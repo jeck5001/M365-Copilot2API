@@ -710,6 +710,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	if body.ToolChoice == nil && len(toolMaps) > 0 {
 		body.ToolChoice = "auto"
 	}
+	planningMode := s.settings.get().ToolPlanningMode
 
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.settings.get().ChatTimeoutSeconds)*time.Second)
 	defer cancel()
@@ -722,7 +723,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	// path forwards ordinary upstream text deltas immediately; tool routing for
 	// non-streaming requests remains below until the event-level tool protocol
 	// is available end-to-end.
-	if body.Stream && len(toolMaps) > 0 && fmt.Sprint(body.ToolChoice) != "none" {
+	if planningMode == "router" && body.Stream && len(toolMaps) > 0 && fmt.Sprint(body.ToolChoice) != "none" {
 		// Preserve the existing validated tool router for streaming tool turns.
 		// Only fall through to text streaming when the router explicitly selects
 		// no tool; this prevents a natural-language preamble from becoming a
@@ -800,7 +801,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Ask the upstream model to select and validate the next tool. The gateway
 	// remains tool-agnostic; it only validates and serializes the decision.
-	if len(toolMaps) > 0 && fmt.Sprint(body.ToolChoice) != "none" {
+	if planningMode == "router" && len(toolMaps) > 0 && fmt.Sprint(body.ToolChoice) != "none" {
 		routePrompt := modelToolRouterPrompt(prompt+"\n"+ledger.RouterContext(), toolMaps, body.ToolChoice)
 		routeRes, routeErr := s.chat.Chat(ctx, account, chathub.Request{Text: routePrompt, Tone: tone})
 		if routeErr != nil {
@@ -853,6 +854,10 @@ APPLICATION_REQUEST_AND_EVIDENCE:
 	}
 	answerPrompt := prompt + "\n" + ledger.RouterContext() + "\nFINAL ANSWER RULE: Report only actions supported by completed tool results. If the goal is not fully verified, state exactly what remains unconfirmed."
 	answerReq := chathub.Request{Text: answerPrompt, Tone: tone, ConversationID: body.ConversationID, SessionID: body.SessionID, Attachments: body.Attachments}
+	if planningMode == "native" {
+		answerReq.Tools = body.Tools
+		answerReq.ToolChoice = body.ToolChoice
+	}
 	var res chathub.Result
 	streamed := false
 	if body.Stream {

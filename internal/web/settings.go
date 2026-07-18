@@ -28,6 +28,7 @@ type runtimeSettings struct {
 	Authority           string `json:"authority"`
 	RedirectURI         string `json:"redirectUri"`
 	Scope               string `json:"scope"`
+	ToolPlanningMode    string `json:"toolPlanningMode"`
 }
 
 type settingsStore struct {
@@ -51,6 +52,7 @@ func defaultRuntimeSettings() runtimeSettings {
 		DebugLogPath: os.Getenv("M365_DEBUG_LOG"), ListenAddress: os.Getenv("M365_LISTEN"), ConfigPath: os.Getenv("M365_CONFIG"),
 		TokenCachePath: os.Getenv("M365_TOKEN_CACHE"), SessionCachePath: os.Getenv("M365_SESSION_CACHE"), ClientID: os.Getenv("M365_CLIENT_ID"),
 		Authority: os.Getenv("M365_AUTHORITY"), RedirectURI: os.Getenv("M365_REDIRECT_URI"), Scope: os.Getenv("M365_SCOPE"),
+		ToolPlanningMode: toolPlanningMode(os.Getenv("M365_TOOL_PLANNING_MODE")),
 	}
 }
 func settingsPath() string {
