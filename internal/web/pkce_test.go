@@ -16,7 +16,11 @@ func TestStartPKCEUsesBrowserClientDefaults(t *testing.T) {
 
 	s := &Server{pkce: map[string]pendingPKCE{}}
 	rr := httptest.NewRecorder()
-	s.startPKCE(rr, httptest.NewRequest(http.MethodPost, "/api/auth/start", nil))
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/start", nil)
+	r.Host = "172.30.0.214"
+	r.Header.Set("X-Forwarded-Host", "unregistered.example")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	s.startPKCE(rr, r)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
@@ -44,6 +48,38 @@ func TestStartPKCEUsesBrowserClientDefaults(t *testing.T) {
 	}
 	if got := u.Query().Get("redirect_uri"); got != response.RedirectURI {
 		t.Fatalf("authorization redirect URI = %q, response redirect URI = %q", got, response.RedirectURI)
+	}
+}
+
+func TestStartPKCEUsesConfiguredRedirectURIExactly(t *testing.T) {
+	const redirectURI = "https://app.example.test/api/auth/callback"
+	t.Setenv("M365_REDIRECT_URI", redirectURI)
+	t.Setenv("M365_PUBLIC_URL", "https://other.example.test")
+
+	s := &Server{pkce: map[string]pendingPKCE{}}
+	rr := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/start", nil)
+	r.Host = "172.30.0.214"
+	r.Header.Set("X-Forwarded-Host", "unregistered.example")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	s.startPKCE(rr, r)
+
+	var response struct {
+		URL         string `json:"url"`
+		RedirectURI string `json:"redirectUri"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if got := response.RedirectURI; got != redirectURI {
+		t.Fatalf("redirect URI = %q, want %q", got, redirectURI)
+	}
+	u, err := url.Parse(response.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := u.Query().Get("redirect_uri"); got != redirectURI {
+		t.Fatalf("authorization redirect URI = %q, want %q", got, redirectURI)
 	}
 }
 
