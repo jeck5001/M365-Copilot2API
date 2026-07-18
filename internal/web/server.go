@@ -14,6 +14,7 @@ import (
 	"m365-native/internal/chathub"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -23,11 +24,12 @@ import (
 )
 
 type pendingPKCE struct {
-	Verifier string
-	Created  time.Time
-	Status   string
-	Account  any
-	Error    string
+	Verifier    string
+	Created     time.Time
+	Status      string
+	Account     any
+	Error       string
+	RedirectURI string
 }
 
 type Server struct {
@@ -350,7 +352,7 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, map[string]string{"status": "deleted"})
 }
 
-func (s *Server) startPKCE(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) startPKCE(w http.ResponseWriter, r *http.Request) {
 	v, err := auth.Verifier()
 	if err != nil {
 		http.Error(w, "pkce failure", http.StatusInternalServerError)
@@ -362,8 +364,9 @@ func (s *Server) startPKCE(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	state := hex.EncodeToString(b)
+	redirectURI := discoverRedirectURI(r)
 	s.mu.Lock()
-	s.pkce[state] = pendingPKCE{Verifier: v, Created: time.Now(), Status: "pending"}
+	s.pkce[state] = pendingPKCE{Verifier: v, Created: time.Now(), Status: "pending", RedirectURI: redirectURI}
 	s.mu.Unlock()
 	jsonOut(w, map[string]string{
 		"status": "pkce_ready",
@@ -371,14 +374,34 @@ func (s *Server) startPKCE(w http.ResponseWriter, _ *http.Request) {
 		"url": auth.AuthorizationURL(
 			auth.AuthorizeEndpoint(),
 			auth.ClientID(),
-			auth.RedirectURI(),
+			redirectURI,
 			state,
 			auth.Challenge(v),
 			auth.Scope(),
 		),
-		"redirectUri": auth.RedirectURI(),
+		"redirectUri": redirectURI,
 		"note":        "If redirect is nativeclient, paste the final URL/code into /api/auth/callback after login.",
 	})
+}
+
+func discoverRedirectURI(r *http.Request) string {
+	if public := strings.TrimRight(strings.TrimSpace(os.Getenv("M365_PUBLIC_URL")), "/"); public != "" {
+		return public + "/api/auth/callback"
+	}
+	if forwardedHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); forwardedHost != "" {
+		scheme := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+		if scheme == "http" || scheme == "https" {
+			return scheme + "://" + forwardedHost + "/api/auth/callback"
+		}
+	}
+	if host := strings.TrimSpace(r.Host); host != "" && host != "127.0.0.1:4141" && host != "localhost:4141" {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		return scheme + "://" + host + "/api/auth/callback"
+	}
+	return auth.RedirectURI()
 }
 
 func (s *Server) pkceStatus(w http.ResponseWriter, r *http.Request) {
@@ -433,7 +456,11 @@ func (s *Server) callbackPKCE(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired state", http.StatusBadRequest)
 		return
 	}
-	tok, err := auth.ExchangeCode(code, p.Verifier, auth.RedirectURI())
+	redirectURI := p.RedirectURI
+	if redirectURI == "" {
+		redirectURI = auth.RedirectURI()
+	}
+	tok, err := auth.ExchangeCode(code, p.Verifier, redirectURI)
 	if err != nil {
 		s.mu.Lock()
 		p.Status = "error"
