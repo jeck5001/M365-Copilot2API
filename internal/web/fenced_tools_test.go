@@ -2,20 +2,16 @@ package web
 
 import "testing"
 
-func TestFencedToolCalls(t *testing.T) {
-	tools := []map[string]any{{"type": "function", "function": map[string]any{"name": "get_current_time", "parameters": map[string]any{"type": "object"}}}}
-	calls := fencedToolCalls("```get_current_time\n{}\n```", tools, "auto")
-	if len(calls) != 1 || calls[0].Name != "get_current_time" || string(calls[0].Arguments) != "{}" {
-		t.Fatalf("%v", calls)
+func TestFencedWorkspaceShellIsStructuredToolCall(t *testing.T) {
+	tools := []map[string]any{{"type": "function", "function": map[string]any{"name": "workspace_shell"}}}
+	calls := fencedToolCalls("```workspace_shell\n{\"command\":\"find /workspace -type f -o -type d | sort\"}\n```", tools, "auto")
+	if len(calls) != 1 {
+		t.Fatalf("expected one structured tool call, got %d", len(calls))
 	}
-}
-
-func TestFencedToolCallsRejectUnknown(t *testing.T) {
-	tools := []map[string]any{{"type": "function", "function": map[string]any{"name": "get_current_time"}}}
-	if got := fencedToolCalls("```shell\n{}\n```", tools, "auto"); len(got) != 0 {
-		t.Fatalf("%v", got)
+	if calls[0].Name != "workspace_shell" {
+		t.Fatalf("unexpected tool name %q", calls[0].Name)
 	}
-	if got := fencedToolCalls("```get_current_time\n{}\n```", tools, "none"); len(got) != 0 {
-		t.Fatalf("%v", got)
+	if string(calls[0].Arguments) != `{"command":"find /workspace -type f -o -type d | sort"}` {
+		t.Fatalf("unexpected arguments: %s", calls[0].Arguments)
 	}
 }

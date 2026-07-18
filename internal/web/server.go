@@ -763,41 +763,46 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		answerReq := chathub.Request{Text: answerPrompt, Tone: tone, ConversationID: body.ConversationID, SessionID: body.SessionID, Attachments: body.Attachments, Tools: body.Tools, ToolChoice: body.ToolChoice}
 		id := "chatcmpl-" + uuid.NewString()
 		model := firstNonEmpty(body.Model, "m365-copilot")
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			return
-		}
-		fmt.Fprintf(w, ": connected\n\n")
-		flusher.Flush()
-		first := true
+		var text strings.Builder
 		var streamedTools []detectedToolCall
 		_, err := s.chat.ChatWithEvents(ctx, account, answerReq, func(ev chathub.StreamEvent) error {
 			if ev.Kind == "tool" && ev.ToolName != "" && len(ev.Arguments) > 0 {
 				streamedTools = append(streamedTools, detectedToolCall{ID: "call_" + uuid.NewString(), Name: ev.ToolName, Arguments: ev.Arguments})
 				return nil
 			}
-			if ev.Kind != "text" || ev.Text == "" {
-				return nil
+			if ev.Kind == "text" && ev.Text != "" {
+				text.WriteString(ev.Text)
 			}
-			delta := map[string]any{"content": ev.Text}
-			if first {
-				delta["role"] = "assistant"
-				first = false
-			}
-			chunk := map[string]any{"id": id, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": model, "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": nil}}}
-			fmt.Fprintf(w, "data: %s\n\n", mustJSON(chunk))
-			flusher.Flush()
 			return nil
 		})
-		if err == nil {
-			for i, tc := range streamedTools {
-				chunk := map[string]any{"id": id, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{map[string]any{"index": i, "id": tc.ID, "type": "function", "function": map[string]any{"name": tc.Name, "arguments": string(tc.Arguments)}}}}, "finish_reason": nil}}}
-				fmt.Fprintf(w, "data: %s\n\n", mustJSON(chunk))
-				flusher.Flush()
-			}
-			fmt.Fprint(w, "data: [DONE]\n\n")
-			flusher.Flush()
+		if err != nil {
+			http.Error(w, upstreamError(err), http.StatusBadGateway)
+			return
 		}
+		calls := streamedTools
+		if len(calls) == 0 {
+			calls = fencedToolCalls(text.String(), toolMaps, body.ToolChoice)
+		}
+		if len(calls) > 0 {
+			calls = limitToolCalls(calls, configuredToolCallLimit(s.settings))
+			_ = writeToolResponse(w, id, model, true, calls, chathub.Result{Text: text.String()})
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "stream unsupported", http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprint(w, ": connected\n\n")
+		flusher.Flush()
+		delta := map[string]any{"role": "assistant", "content": text.String()}
+		chunk := map[string]any{"id": id, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": model, "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": nil}}}
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(chunk))
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
 		return
 	}
 	// Ask the upstream model to select and validate the next tool. The gateway
