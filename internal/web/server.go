@@ -791,7 +791,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "data: %s\n\n", mustJSON(chunk))
 			flusher.Flush()
 		}
-		_, err := s.chat.ChatWithEvents(ctx, account, answerReq, func(ev chathub.StreamEvent) error {
+		res, err := s.chat.ChatWithEvents(ctx, account, answerReq, func(ev chathub.StreamEvent) error {
 			if ev.Kind == "tool" && ev.ToolName != "" && len(ev.Arguments) > 0 {
 				streamedTools = append(streamedTools, detectedToolCall{ID: "call_" + uuid.NewString(), Name: ev.ToolName, Arguments: ev.Arguments})
 				return nil
@@ -826,6 +826,13 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		})
 		if err != nil {
 			return
+		}
+		// Some ChatHub updates contain no text event and place the completed
+		// answer only in the final Result. Recover it before deciding that the
+		// response is empty; this also preserves fenced-tool parsing.
+		if text.Len() == 0 && strings.TrimSpace(res.Text) != "" {
+			text.WriteString(res.Text)
+			pending.WriteString(res.Text)
 		}
 		calls := streamedTools
 		if len(calls) == 0 {
