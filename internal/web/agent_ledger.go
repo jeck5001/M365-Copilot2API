@@ -123,9 +123,20 @@ func (l agentLedger) RouterContext() string {
 	}
 	return hint + "\nEVIDENCE_LEDGER: " + string(b)
 }
+func canonicalToolArguments(s string) string {
+	s = strings.TrimSpace(s)
+	var v any
+	if json.Unmarshal([]byte(s), &v) == nil {
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
+	return s
+}
+
 func (l agentLedger) hasCompleted(name, args string) bool {
+	want := canonicalToolArguments(args)
 	for _, e := range l.Completed {
-		if e.Name == name && strings.TrimSpace(e.Arguments) == strings.TrimSpace(args) {
+		if e.Name == name && canonicalToolArguments(e.Arguments) == want {
 			return true
 		}
 	}
