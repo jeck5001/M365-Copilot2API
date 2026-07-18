@@ -61,6 +61,8 @@ func (s *Server) streamResponsesAdapter(w http.ResponseWriter, r *http.Request, 
 	emit("response.created", map[string]any{"type": "response.created", "response": map[string]any{"id": id, "object": "response", "status": "in_progress", "model": model, "output": []any{}}})
 
 	var text strings.Builder
+	messageID := "msg_" + uuid.NewString()
+	contentID := "txt_" + uuid.NewString()
 	type tcState struct{ ID, Name, Args string }
 	calls := map[int]*tcState{}
 	scanner := bufio.NewScanner(pr)
@@ -82,7 +84,6 @@ func (s *Server) streamResponsesAdapter(w http.ResponseWriter, r *http.Request, 
 		delta, _ := choice["delta"].(map[string]any)
 		if content, ok := delta["content"].(string); ok && content != "" {
 			text.WriteString(content)
-			emit("response.output_text.delta", map[string]any{"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": content})
 		}
 		if rawCalls, ok := delta["tool_calls"].([]any); ok {
 			for _, raw := range rawCalls {
@@ -127,9 +128,13 @@ func (s *Server) streamResponsesAdapter(w http.ResponseWriter, r *http.Request, 
 			emit("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": i, "item": item})
 		}
 	} else {
-		item := map[string]any{"type": "message", "id": "msg_" + uuid.NewString(), "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": text.String(), "annotations": []any{}}}}
+		item := map[string]any{"type": "message", "id": messageID, "role": "assistant", "status": "in_progress", "content": []any{map[string]any{"type": "output_text", "id": contentID, "text": "", "annotations": []any{}}}}
 		output = append(output, item)
-		emit("response.output_text.done", map[string]any{"type": "response.output_text.done", "output_index": 0, "content_index": 0, "text": text.String()})
+		emit("response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": 0, "item": item})
+		emit("response.output_text.delta", map[string]any{"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "item_id": messageID, "delta": text.String()})
+		emit("response.output_text.done", map[string]any{"type": "response.output_text.done", "output_index": 0, "content_index": 0, "item_id": messageID, "text": text.String()})
+		item["status"] = "completed"
+		item["content"] = []any{map[string]any{"type": "output_text", "id": contentID, "text": text.String(), "annotations": []any{}}}
 		emit("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item})
 	}
 	resp := map[string]any{"id": id, "object": "response", "created_at": created, "status": "completed", "model": model, "output": output}

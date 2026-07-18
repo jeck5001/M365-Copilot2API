@@ -32,7 +32,8 @@ func writeResponsesResult(w http.ResponseWriter, model string, stream bool, src 
 		}
 	} else {
 		text, _ := msg["content"].(string)
-		output = append(output, map[string]any{"type": "message", "id": "msg_" + uuid.NewString(), "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}}})
+		messageID := "msg_" + uuid.NewString()
+		output = append(output, map[string]any{"type": "message", "id": messageID, "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}}})
 	}
 	resp := map[string]any{"id": id, "object": "response", "created_at": time.Now().Unix(), "status": "completed", "model": model, "output": output}
 	if !stream {
