@@ -50,7 +50,6 @@ func scopedCallID(name, args string, index int, scope string) string {
 	h := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%s:%s", scope, index, name, args)))
 	return "call_" + hex.EncodeToString(h[:8])
 }
-
 func buildAgentLedger(messages []oaiMsg) agentLedger {
 	calls := map[string]toolEvidence{}
 	order := []string{}
@@ -68,36 +67,35 @@ func buildAgentLedger(messages []oaiMsg) agentLedger {
 			}
 		}
 		if m.Role == "tool" {
-			e, ok := calls[m.ToolCallID]
-			if !ok {
-				continue
+			if e, ok := calls[m.ToolCallID]; ok {
+				e.Result = compactToolResult(contentToString(m.Content), 4000)
+				e.Failed = failureSignal.MatchString(e.Result)
+				calls[m.ToolCallID] = e
 			}
-			e.Result = compactToolResult(contentToString(m.Content), 4000)
-			e.Failed = failureSignal.MatchString(e.Result)
-			calls[m.ToolCallID] = e
 		}
 	}
 	l := agentLedger{}
-	seenFailure := map[string]int{}
 	seenCall := map[string]int{}
+	seenFailure := map[string]int{}
 	for _, id := range order {
 		e := calls[id]
 		l.ToolRounds++
-		callSig := e.Name + "\x00" + e.Arguments
-		seenCall[callSig]++
-		if seenCall[callSig] >= 3 {
+		sig := e.Name + "\x00" + e.Arguments
+		seenCall[sig]++
+		if seenCall[sig] >= 2 {
 			l.RepeatedCall = true
+			l.RepetitionSignature = sig
 		}
 		if e.Result == "" {
 			l.Pending = append(l.Pending, e)
 		} else {
 			l.Completed = append(l.Completed, e)
 			if e.Failed {
-				sig := e.Name + "\x00" + e.Arguments + "\x00" + normalizeFailure(e.Result)
-				seenFailure[sig]++
-				if seenFailure[sig] >= 2 {
+				fs := e.Name + "\x00" + e.Arguments + "\x00" + normalizeFailure(e.Result)
+				seenFailure[fs]++
+				if seenFailure[fs] >= 2 {
 					l.RepeatedFailure = true
-					l.RepetitionSignature = sig
+					l.RepetitionSignature = fs
 				}
 			}
 		}
@@ -113,44 +111,35 @@ func normalizeFailure(s string) string {
 	return s
 }
 func (l agentLedger) RouterContext() string {
-	b, _ := json.Marshal(l)
-	hint := "Use this evidence ledger. Never treat a pending call as completed."
-	if l.RepeatedFailure {
-		hint += " The same call produced the same failure repeatedly; change strategy or request missing information instead of retrying unchanged."
+	type compact struct {
+		Completed    []toolEvidence `json:"completed"`
+		Pending      []toolEvidence `json:"pending"`
+		RepeatedCall bool           `json:"repeated_call"`
 	}
-	if l.RepeatedCall {
-		hint += " The same call has been issued repeatedly; do not repeat it unchanged unless new evidence explicitly justifies polling. Prefer a different diagnostic action or an honest incomplete result."
+	b, _ := json.Marshal(compact{l.Completed, l.Pending, l.RepeatedCall})
+	hint := "Use only this compact evidence. A completed call is final evidence; do not issue the same name and arguments again."
+	if l.RepeatedFailure {
+		hint += " The same call failed repeatedly; change strategy instead of retrying unchanged."
 	}
 	return hint + "\nEVIDENCE_LEDGER: " + string(b)
 }
-func maxToolRounds() int {
-	if raw, exists := os.LookupEnv("M365_MAX_TOOL_ROUNDS"); exists {
-		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n > 0 && n <= 512 {
-			return n
-		}
-		return 32
-	}
-	if n := currentSettings().MaxToolRounds; n > 0 && n <= 512 {
-		return n
-	}
-	return 32
-}
-
-// activeMessages keeps only the current user turn and its follow-up tool loop.
-// Older completed tool history must not block model switches or new user turns.
-func activeMessages(messages []oaiMsg) []oaiMsg {
-	lastUser := -1
-	for i, m := range messages {
-		if m.Role == "user" {
-			lastUser = i
+func (l agentLedger) hasCompleted(name, args string) bool {
+	for _, e := range l.Completed {
+		if e.Name == name && strings.TrimSpace(e.Arguments) == strings.TrimSpace(args) {
+			return true
 		}
 	}
-	if lastUser <= 0 {
-		return messages
-	}
-	return messages[lastUser:]
+	return false
 }
-
+func filterCompletedCalls(calls []detectedToolCall, l agentLedger) []detectedToolCall {
+	out := calls[:0]
+	for _, c := range calls {
+		if !l.hasCompleted(c.Name, string(c.Arguments)) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
 func (l agentLedger) CanContinue(maxRounds int) error {
 	if maxRounds <= 0 {
 		maxRounds = 32
@@ -163,7 +152,30 @@ func (l agentLedger) CanContinue(maxRounds int) error {
 	}
 	return nil
 }
-
+func maxToolRounds() int {
+	if raw, ok := os.LookupEnv("M365_MAX_TOOL_ROUNDS"); ok {
+		if n, e := strconv.Atoi(strings.TrimSpace(raw)); e == nil && n > 0 && n <= 512 {
+			return n
+		}
+		return 32
+	}
+	if n := currentSettings().MaxToolRounds; n > 0 && n <= 512 {
+		return n
+	}
+	return 32
+}
+func activeMessages(messages []oaiMsg) []oaiMsg {
+	last := -1
+	for i, m := range messages {
+		if m.Role == "user" {
+			last = i
+		}
+	}
+	if last <= 0 {
+		return messages
+	}
+	return messages[last:]
+}
 func completionEvidenceAllows(answer string, l agentLedger) bool {
 	if len(l.Pending) > 0 {
 		return false
