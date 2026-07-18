@@ -106,6 +106,12 @@ func (s *Server) streamResponsesAdapter(w http.ResponseWriter, r *http.Request, 
 			}
 		}
 	}
+	if len(calls) == 0 && strings.TrimSpace(text.String()) == "" {
+		// The upstream connection can close normally without producing a
+		// response. Do not emit a completed Responses resource with an empty
+		// message ID that clients may try to reference on the next turn.
+		return
+	}
 	output := []any{}
 	if len(calls) > 0 {
 		for i := 0; i < len(calls); i++ {
@@ -172,7 +178,23 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeResponsesError(w, http.StatusBadGateway, "upstream_error", "upstream protocol error: "+err.Error())
 		return
 	}
+	if !responsesOutputHasContent(out) {
+		writeResponsesError(w, http.StatusBadGateway, "upstream_error", "ChatHub returned an empty response; no reusable message was created")
+		return
+	}
 	writeResponsesResult(w, firstNonEmpty(body.Model, "m365-copilot"), body.Stream, out)
+}
+
+func responsesOutputHasContent(src map[string]any) bool {
+	msg, _ := openAIChoice(src)
+	if msg == nil {
+		return false
+	}
+	if calls, ok := msg["tool_calls"].([]any); ok && len(calls) > 0 {
+		return true
+	}
+	text, _ := msg["content"].(string)
+	return strings.TrimSpace(text) != ""
 }
 
 func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request) {
