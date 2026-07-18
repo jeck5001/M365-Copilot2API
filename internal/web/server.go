@@ -649,30 +649,12 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"type": "tool_round_limit", "message": err.Error(), "completed_calls": len(activeLedger.Completed)}})
 		return
 	}
-	// Flatten messages while preserving tool result identity and bounding noisy output.
-	var parts []string
-	for _, m := range body.Messages {
-		role := m.Role
-		if role == "" {
-			role = "user"
-		}
-		txt, attachments := parseContent(m.Content)
-		txt = strings.TrimSpace(txt)
-		body.Attachments = append(body.Attachments, attachments...)
-		if len(m.ToolCalls) > 0 {
-			parts = append(parts, role+" tool_calls: "+mustJSON(m.ToolCalls))
-		}
-		if m.Role == "tool" {
-			txt = compactToolResult(txt, 4000)
-			parts = append(parts, "tool["+m.ToolCallID+"]: "+txt)
-			continue
-		}
-		if txt == "" {
-			continue
-		}
-		parts = append(parts, role+": "+txt)
-	}
-	prompt := strings.TrimSpace(strings.Join(parts, "\n"))
+	// Preserve role boundaries when adapting OpenAI messages to ChatHub's
+	// single message.text field. This keeps system/developer instructions,
+	// history, and the current user turn distinguishable.
+	var prompt string
+	prompt, body.Attachments = flattenPromptMessages(body.Messages, body.Attachments)
+	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		http.Error(w, "messages required", http.StatusBadRequest)
 		return
