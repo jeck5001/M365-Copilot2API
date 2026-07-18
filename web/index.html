@@ -480,10 +480,20 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .modal-card{border-radius:4px}
 .notice{border-left:3px solid #0f6cbd}
 @media(max-width:700px){
- .content{padding:20px 14px}
+ .content{padding:20px 14px;max-width:100%;overflow-x:hidden}
  .page-head{gap:14px;align-items:flex-start}
  .page-head .btn{white-space:nowrap}
- .table th,.table td{padding:11px 14px}
+ .table-wrap{overflow-x:hidden}
+ .table{width:100%;min-width:0;table-layout:fixed}
+ .table th,.table td{padding:11px 10px;min-width:0;overflow-wrap:anywhere;word-break:break-word}
+ .table th:first-child,.table td:first-child{width:64%}
+ .table th:nth-child(2),.table td:nth-child(2){width:22%}
+ .table th:nth-child(3),.table td:nth-child(3){display:none}
+ .table th:last-child,.table td:last-child{width:14%;padding-left:2px;padding-right:2px}
+ .account-cell{gap:8px;min-width:0}
+ .account-cell>div:last-child{min-width:0}
+ .account-cell b,.account-cell .muted{display:block;overflow-wrap:anywhere;word-break:break-word}
+ .table .btn{padding:6px 4px;font-size:11px;white-space:normal}
  .form-panel{padding:18px}
  .modal-card{padding:20px}
 }
