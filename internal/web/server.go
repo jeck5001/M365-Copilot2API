@@ -789,10 +789,10 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	if body.ToolChoice == nil && len(toolMaps) > 0 {
 		body.ToolChoice = "auto"
 	}
-	// Tool routing is protocol-driven: forward declared tools once and let the
-	// upstream emit tool events. The legacy router remains in the file for
-	// rollback, but is not selected for request handling.
-	planningMode := "native"
+	// ChatHub does not reliably return native tool events. Keep ordinary
+	// requests direct, and use the established XML/fenced translation router
+	// only when the caller actually supplied callable tools.
+	planningMode := "router"
 	if len(toolMaps) == 0 || normalizedToolChoiceMode(body.ToolChoice) == "none" {
 		planningMode = "direct"
 	}
