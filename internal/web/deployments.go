@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"m365-native/internal/outbound"
 	"net/http"
 	"net/url"
 	"os"
@@ -243,8 +242,8 @@ func (s *Server) deploymentCheck(w http.ResponseWriter, r *http.Request) {
 		d.LatencyMs = lat
 		d.LastCheckedAt = time.Now()
 		resp.Body.Close()
-		// Only verified endpoints enter the active proxy pool.
-		_ = outbound.AddProxy(target)
+		// Health alone does not prove HTTP proxy forwarding. Keep deployment records
+		// separate until an authenticated relay endpoint is implemented and verified.
 	}
 	out := *d
 	st.mu.Unlock()

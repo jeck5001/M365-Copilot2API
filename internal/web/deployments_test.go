@@ -90,13 +90,7 @@ func TestDeploymentCheckAddsHealthyURLToPool(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	found := false
-	for _, x := range outbound.ProxyPoolStatus() {
-		if x["url"] == ts.URL {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("not added: %#v", outbound.ProxyPoolStatus())
+	if len(outbound.ProxyPoolStatus()) != 0 {
+		t.Fatalf("health-only deployment must not enter proxy pool: %#v", outbound.ProxyPoolStatus())
 	}
 }

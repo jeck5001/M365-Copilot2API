@@ -94,6 +94,7 @@ func AddProxy(raw string) error {
 }
 
 func RemoveProxy(raw string) error {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
 	clientsMu.RLock()
 	p := proxyPool
 	clientsMu.RUnlock()
@@ -101,10 +102,18 @@ func RemoveProxy(raw string) error {
 		return nil
 	}
 	items := make([]string, 0)
+	found := false
 	for _, item := range p.List() {
-		if v, ok := item["url"].(string); ok && v != raw {
+		if v, ok := item["url"].(string); ok {
+			if strings.TrimRight(strings.TrimSpace(v), "/") == raw {
+				found = true
+				continue
+			}
 			items = append(items, v)
 		}
+	}
+	if !found {
+		return fmt.Errorf("proxy not found: %s", raw)
 	}
 	return ConfigurePool(items)
 }

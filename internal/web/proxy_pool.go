@@ -61,7 +61,7 @@ func (s *Server) proxyPool(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOut(w, map[string]any{"ok": true, "added": added, "proxies": outbound.ProxyPoolStatus()})
 	case http.MethodDelete:
-		raw := strings.TrimSpace(r.URL.Query().Get("url"))
+		raw := strings.TrimRight(strings.TrimSpace(r.URL.Query().Get("url")), "/")
 		if raw == "" {
 			if err := outbound.ConfigurePool(nil); err != nil {
 				writeOpenAIError(w, 400, "invalid_request_error", err.Error())
