@@ -24,7 +24,7 @@ html, body {
 body {
 	background: var(--bg);
 	color: var(--text);
-	font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+	font-family: "Signifier", Georgia, "Times New Roman", serif;
 	font-size: 14px;
 	line-height: 1.4286;
 	-webkit-font-smoothing: antialiased;
@@ -60,17 +60,21 @@ body {
 	gap: 2px;
 	padding: 2px;
 	box-sizing: border-box;
-	background: linear-gradient(135deg, #d97757 0%, #b85c7a 48%, #6d5bd0 100%);
-	border-radius: 7px;
+	background: transparent;
+	border-radius: 0;
 	border: 0;
-	box-shadow: 0 2px 8px rgba(109,91,208,.20);
+	box-shadow: none;
 }
 .logo-mark span {
 	display: block;
 	min-width: 0;
 	min-height: 0;
 }
-.logo-mark span { background: rgba(255,255,255,.92); border-radius: 50%; }
+.logo-mark span { display:block; border-radius:0; }
+.logo-mark span:nth-child(1) { background:#f25022; }
+.logo-mark span:nth-child(2) { background:#7fba00; }
+.logo-mark span:nth-child(3) { background:#00a4ef; }
+.logo-mark span:nth-child(4) { background:#ffb900; }
 .nav-label {
 	font-size: 11px;
 	font-weight: 600;
