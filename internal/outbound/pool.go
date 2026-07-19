@@ -19,6 +19,7 @@ type poolEntry struct {
 	lastCheck time.Time
 	latency   time.Duration
 	lastError string
+	health    string
 }
 type Pool struct {
 	mu      sync.Mutex
@@ -110,7 +111,7 @@ func (p *Pool) List() []map[string]any {
 	defer p.mu.Unlock()
 	out := make([]map[string]any, 0, len(p.entries))
 	for _, e := range p.entries {
-		out = append(out, map[string]any{"url": e.raw, "failures": e.failures, "cooldownUntil": e.cooldown, "lastCheck": e.lastCheck, "latencyMs": e.latency.Milliseconds(), "lastError": e.lastError})
+		out = append(out, map[string]any{"url": e.raw, "failures": e.failures, "cooldownUntil": e.cooldown, "lastCheck": e.lastCheck, "latencyMs": e.latency.Milliseconds(), "lastError": e.lastError, "health": e.health})
 	}
 	return out
 }

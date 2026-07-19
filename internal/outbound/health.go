@@ -8,6 +8,16 @@ import (
 	"time"
 )
 
+func (p *Pool) setHealth(raw, status string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, e := range p.entries {
+		if e.raw == raw {
+			e.health = status
+			return
+		}
+	}
+}
 func (p *Pool) Check(ctx context.Context, raw string) (time.Duration, error) {
 	p.mu.Lock()
 	var e *poolEntry
@@ -31,21 +41,22 @@ func (p *Pool) Check(ctx context.Context, raw string) (time.Duration, error) {
 	}
 	start := time.Now()
 	resp, err := e.clients.HTTP.Do(req)
-	latency := time.Since(start)
+	lat := time.Since(start)
 	if err != nil {
 		p.mark(raw, err)
-		return latency, err
+		p.setHealth(raw, "unreachable")
+		return lat, err
 	}
 	status := resp.Status
+	code := resp.StatusCode
 	resp.Body.Close()
-	// Any HTTP response proves the proxy connection and HTTP exchange worked.
-	// 5xx is reported separately as an upstream/gateway response, not a dial failure.
-	if resp.StatusCode >= 500 {
-		p.mark(raw, nil)
-		return latency, fmt.Errorf("proxy reachable; upstream returned %s", status)
-	}
 	p.mark(raw, nil)
-	return latency, nil
+	if code >= 500 {
+		p.setHealth(raw, "upstream_error")
+		return lat, fmt.Errorf("proxy reachable; upstream returned %s", status)
+	}
+	p.setHealth(raw, "reachable")
+	return lat, nil
 }
 func (p *Pool) CheckAll(ctx context.Context) []map[string]any {
 	p.mu.Lock()
@@ -56,13 +67,13 @@ func (p *Pool) CheckAll(ctx context.Context) []map[string]any {
 	p.mu.Unlock()
 	for _, raw := range raws {
 		c, cancel := context.WithTimeout(ctx, 10*time.Second)
-		latency, err := p.Check(c, raw)
+		lat, err := p.Check(c, raw)
 		cancel()
 		p.mu.Lock()
 		for _, e := range p.entries {
 			if e.raw == raw {
 				e.lastCheck = time.Now()
-				e.latency = latency
+				e.latency = lat
 				e.lastError = ""
 				if err != nil {
 					e.lastError = err.Error()
