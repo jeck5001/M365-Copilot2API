@@ -1,7 +1,9 @@
 package outbound
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -86,11 +88,22 @@ func (p *Pool) HTTPClient() *http.Client {
 	return directClients().HTTP
 }
 func (p *Pool) WebSocketDialer() *websocket.Dialer {
-	if e := p.pick(); e != nil {
-		d := *e.clients.WebSocket
-		return &d
+	base := directClients().WebSocket
+	baseDialer := &net.Dialer{}
+	base.NetDialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		e := p.pick()
+		if e == nil {
+			return baseDialer.DialContext(ctx, network, address)
+		}
+		dial := e.clients.WebSocket.NetDialContext
+		if dial == nil {
+			dial = baseDialer.DialContext
+		}
+		conn, err := dial(ctx, network, address)
+		p.mark(e.raw, err)
+		return conn, err
 	}
-	return directClients().WebSocket
+	return base
 }
 func (p *Pool) List() []map[string]any {
 	p.mu.Lock()
