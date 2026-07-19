@@ -24,7 +24,7 @@ type responsesRequest struct {
 	NewConversation    bool             `json:"new_conversation,omitempty"`
 }
 
-const customExecWorkspaceInstruction = `The caller's shell executor already starts in the correct workspace. Use relative paths from that workspace; do not guess or cd to an absolute /root path. For repository inspection or changes, invoke the custom exec tool and wait for its result before claiming completion.`
+const customExecWorkspaceInstruction = `You are operating through the caller's local OpenCode execution bridge. Never use, request, or mention Microsoft 365/Copilot native tools. The only permitted execution tool is the caller-provided custom exec tool. The executor already starts in the caller-selected project workspace. Use relative paths only; never guess, cd to, or write under /root, /workspace, /tmp, or any other absolute project path. Inspect pwd and ls before changes. Do not create files outside the current working directory. Never claim a file was created, modified, or verified until custom exec returns a successful result. After every execution, use custom exec to verify the result.`
 
 func (r responsesRequest) openAI() (oaiReq, error) {
 	o := oaiReq{Model: r.Model, AccountID: r.AccountID, Stream: r.Stream, ToolChoice: r.ToolChoice, User: r.User}
@@ -100,8 +100,20 @@ func (r responsesRequest) openAI() (oaiReq, error) {
 	hasCustomExec := false
 	for _, t := range r.Tools {
 		typ, _ := t["type"].(string)
+		name, _ := t["name"].(string)
+		if typ == "custom" && name == "exec" {
+			hasCustomExec = true
+			break
+		}
+	}
+	for _, t := range r.Tools {
+		typ, _ := t["type"].(string)
+		name, _ := t["name"].(string)
+		if hasCustomExec && !(typ == "custom" && name == "exec") {
+			continue
+		}
 		f := map[string]any{"name": t["name"], "description": t["description"], "parameters": t["parameters"]}
-		if typ == "custom" && t["name"] == "exec" {
+		if typ == "custom" && name == "exec" {
 			// ChatHub accepts JSON function arguments while Codex exec accepts a
 			// grammar-constrained raw input string. Preserve the distinction in
 			// Tool.Type and bridge the input through a single string field.

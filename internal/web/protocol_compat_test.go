@@ -1,6 +1,10 @@
 package web
 
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+)
 
 func TestResponsesToOpenAI(t *testing.T) {
 	r := responsesRequest{Model: "m", Input: "what time", Tools: []map[string]any{{"type": "function", "name": "clock", "parameters": map[string]any{"type": "object"}}}}
@@ -18,6 +22,23 @@ func TestResponsesCustomExecToOpenAI(t *testing.T) {
 	}
 	if string(o.Tools[0].Function) == "" || !containsJSON(o.Tools[0].Function, "input") {
 		t.Fatalf("custom exec did not receive an input schema: %s", o.Tools[0].Function)
+	}
+}
+
+func TestResponsesCustomExecIsExclusiveTool(t *testing.T) {
+	r := responsesRequest{Input: "edit the project", Tools: []map[string]any{
+		{"type": "custom", "name": "exec", "description": "local execution"},
+		{"type": "function", "name": "m365_search", "description": "native search"},
+	}}
+	o, err := r.openAI()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(o.Tools) != 1 || o.Tools[0].Type != "custom" {
+		t.Fatalf("tools=%#v, want only custom exec", o.Tools)
+	}
+	if !strings.Contains(fmt.Sprint(o.Messages[0].Content), "Never use") {
+		t.Fatalf("missing native-tool prohibition: %#v", o.Messages)
 	}
 }
 
