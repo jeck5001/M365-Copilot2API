@@ -10,8 +10,10 @@ import (
 	"m365-copilot2api/internal/outbound"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -22,6 +24,209 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// overlapLen returns the length of the longest suffix of cur that is also a
+// prefix of snapshot, i.e. how much of snapshot cur already ends with. The scan
+// starts at the longest candidate so the common case — a snapshot that repeats
+// almost everything and appends a little — settles in the first few rounds.
+//
+// Matches are byte-wise but the result is always a rune boundary: two different
+// CJK characters can share a leading byte, and cutting there would emit half a
+// character and corrupt the text.
+func overlapLen(cur, snapshot string) int {
+	for n := minInt(len(cur), len(snapshot)); n > 0; n-- {
+		if n < len(snapshot) && !utf8.RuneStart(snapshot[n]) {
+			continue
+		}
+		if strings.HasSuffix(cur, snapshot[:n]) {
+			return n
+		}
+	}
+	return 0
+}
+
+// unseenTail returns the part of snapshot that has not been streamed yet. It is
+// the fallback for a snapshot that does not extend a known baseline, where the
+// only usable signal is an overlap with what the caller already received.
+func unseenTail(cur, snapshot string) string {
+	if cur == "" {
+		return snapshot
+	}
+	if strings.HasPrefix(snapshot, cur) {
+		return strings.TrimPrefix(snapshot, cur)
+	}
+	if i := strings.Index(snapshot, cur); i >= 0 {
+		return snapshot[i+len(cur):]
+	}
+	// No containment: assume every byte is new. Trimming on a boundary overlap
+	// here deleted text, because unrelated prose shares short runs by chance, and
+	// the run that matches is the head of the answer.
+	return snapshot
+}
+
+// snapshotEmitter converts ChatHub's text frames into non-overlapping deltas.
+//
+// ChatHub carries the answer on two channels that look interchangeable and are
+// not. A capture of 50 turns shows:
+//
+//   - messages[].text — usually one bot prose message per turn, occasionally a
+//     preamble followed by the answer, resent in full on every frame and
+//     strictly prefix-cumulative: not one snapshot in 50 turns failed to start
+//     with its predecessor, and concatenating each message's last snapshot
+//     reproduced the completion frame's answer exactly every time.
+//   - writeAtCursor — a separate incremental stream that is not the same
+//     content. Over one 4932-character answer it omitted 1506 characters in 235
+//     gaps, and its increments matched the snapshot's growth twice out of 531.
+//
+// So the channels duplicate each other without agreeing, and merging them can
+// only repeat text or delete it. Earlier rounds tried to reconcile them by
+// overlap and produced both: 857KB of echo from one 4.7KB answer, then answers
+// with characters missing mid-sentence. Only the snapshot channel is complete
+// and checkable against the completion frame, so it alone drives the stream and
+// writeAtCursor is a fallback for a turn that never sends a bot message.
+type snapshotEmitter struct {
+	// streamed reports everything emitted so far, including deltas that did not
+	// come from a snapshot source.
+	streamed func() string
+	last     map[string]string
+	emit     func(string) error
+	// sawSnapshot latches once any bot message arrives: from then on the cursor
+	// channel is redundant, and emitting it would double the answer.
+	sawSnapshot bool
+	// cursorEmitted records that the fallback wrote text this turn, so the first
+	// snapshot knows the buffer may already hold part of it.
+	cursorEmitted bool
+}
+
+func newSnapshotEmitter(streamed func() string, emit func(string) error) *snapshotEmitter {
+	return &snapshotEmitter{streamed: streamed, last: map[string]string{}, emit: emit}
+}
+
+// Add reports a bot message's snapshot and emits only its unseen part. State is
+// per source, so a second message cannot reset the first message's baseline.
+//
+// Growth is a prefix extension in every captured turn, which makes the delta an
+// exact slice rather than a guess. The remaining branches are defensive: nothing
+// in the capture restates or rewinds a snapshot, and if that ever happens the
+// overlap search repeats text instead of dropping it. That direction is
+// deliberate — the answer returned to the caller comes from the completion
+// frame, so a duplicate is a display artifact while a deletion corrupts a reply.
+func (s *snapshotEmitter) Add(source, snapshot string) error {
+	if snapshot == "" {
+		return nil
+	}
+	s.sawSnapshot = true
+	prev, seen := s.last[source]
+	if snapshot == prev {
+		return nil
+	}
+	s.last[source] = snapshot
+	if seen && strings.HasPrefix(snapshot, prev) {
+		return s.emit(snapshot[len(prev):])
+	}
+	if !seen && !s.cursorEmitted {
+		// A message the stream has not carried any part of yet.
+		return s.emit(snapshot)
+	}
+	// Either the cursor fallback already wrote some of this turn, or a source
+	// restated its text instead of extending it.
+	return s.emit(unseenTail(s.streamed(), snapshot))
+}
+
+// AddCursor reports a writeAtCursor delta. It is emitted verbatim — the channel
+// is already incremental, so applying snapshot logic to it was itself a source
+// of corruption — and only until the first bot message arrives, after which the
+// snapshot channel carries the same answer in full and this one is pure echo.
+func (s *snapshotEmitter) AddCursor(delta string) error {
+	if delta == "" || s.sawSnapshot {
+		return nil
+	}
+	s.cursorEmitted = true
+	return s.emit(delta)
+}
+
+// dumpFrames writes the turn's raw SignalR frames to the path in
+// M365_CHATHUB_DUMP_FRAMES, one JSON frame per line, and does nothing when that
+// variable is unset. How ChatHub splits an answer across writeAtCursor and the
+// resent messages array is the one thing the timing logs cannot show, and the
+// snapshot merge is guesswork without it. Frames contain the answer text, so this
+// stays opt-in and off by default.
+// maxFrameDumpBytes bounds the dump file. It is append-only on a mounted volume,
+// so a flag left on after debugging would otherwise grow without limit. A few
+// turns' worth of frames is all the merge logic needs.
+const maxFrameDumpBytes = 64 << 20
+
+func dumpFrames(path string, events []json.RawMessage) {
+	if path == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		log.Printf("chathub frame dump open failed path=%s err=%v", path, err)
+		return
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err == nil && st.Size() >= maxFrameDumpBytes {
+		log.Printf("chathub frame dump full size=%d path=%s, skipping", st.Size(), path)
+		return
+	}
+	for _, ev := range events {
+		if _, err := f.Write(append(append([]byte(nil), ev...), '\n')); err != nil {
+			log.Printf("chathub frame dump write failed err=%v", err)
+			return
+		}
+	}
+	log.Printf("chathub frame dump wrote frames=%d path=%s", len(events), path)
+}
+
+// completionText returns the answer text carried by a SignalR type 2 completion
+// frame's item. ChatHub restates the finished turn there as a normal messages
+// array, which makes it the one authoritative copy of the answer: it is a single
+// value rather than something reassembled from a stream. In 19 captured turns it
+// matched the last streamed snapshot exactly.
+//
+// item.result.message repeats the same text, but it is a status field that also
+// carries error strings on failure, so the messages array is the safer source
+// and this takes precedence over it.
+//
+// A turn can hold more than one prose message: the model says what it is about
+// to do, works, then answers. All of them are part of the reply and all of them
+// were streamed, so taking only the last silently dropped the preamble for
+// non-streaming callers. Joining them matched the streamed text byte for byte in
+// all 50 captured turns.
+func completionText(item map[string]any) string {
+	msgs, _ := item["messages"].([]any)
+	var text strings.Builder
+	for _, raw := range msgs {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		author, _ := m["author"].(string)
+		mt, _ := m["messageType"].(string)
+		t, _ := m["text"].(string)
+		// Same filter as the streaming path: visible bot prose only, never
+		// Progress or tool-call envelopes.
+		if author == "bot" && mt == "" && strings.TrimSpace(t) != "" {
+			text.WriteString(t)
+		}
+	}
+	return text.String()
+}
+
+// messageSource names the snapshot stream a bot message belongs to, so each
+// message is diffed only against its own previous text. ChatHub has used
+// several spellings for the identifier and does not always send one; the array
+// position is a stable fallback because the full messages array is resent in
+// frame order.
+func messageSource(m map[string]any, index int) string {
+	for _, key := range []string{"messageId", "id", "requestId"} {
+		if v, ok := m[key].(string); ok && v != "" {
+			return "msg:" + v
+		}
+	}
+	return fmt.Sprintf("msg#%d", index)
 }
 
 const (
@@ -221,29 +426,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		}
 		return nil
 	}
-	// ChatHub signals text either as a full snapshot or as cursor rewrites.
-	// Only the portion not already streamed may be emitted; naive prefix
-	// checks misfire when upstream rewrites the whole buffer, which duplicated
-	// answers (AAA…). Match any overlap and emit the tail.
-	emitSnapshot := func(snapshot string) error {
-		if snapshot == "" {
-			return nil
-		}
-		cur := streamed.String()
-		if cur == "" {
-			return emitDelta(snapshot)
-		}
-		if strings.HasPrefix(snapshot, cur) {
-			return emitDelta(strings.TrimPrefix(snapshot, cur))
-		}
-		if i := strings.Index(snapshot, cur); i >= 0 {
-			return emitDelta(snapshot[i+len(cur):])
-		}
-		if len(snapshot) > len(cur) && strings.HasSuffix(snapshot, cur) {
-			return emitDelta(snapshot[:len(snapshot)-len(cur)])
-		}
-		return emitDelta(snapshot)
-	}
+	snapshots := newSnapshotEmitter(streamed.String, emitDelta)
 	var final string
 	var throttling any
 	var rawResult string
@@ -331,7 +514,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 						}
 					}
 					if w, ok := arg["writeAtCursor"].(string); ok && w != "" && !toolFrame {
-						if err := emitSnapshot(w); err != nil {
+						if err := snapshots.AddCursor(w); err != nil {
 							return Result{}, err
 						}
 					}
@@ -339,7 +522,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 						throttling = thr
 					}
 					if msgs, ok := arg["messages"].([]any); ok {
-						for _, mraw := range msgs {
+						for i, mraw := range msgs {
 							m, ok := mraw.(map[string]any)
 							if !ok {
 								continue
@@ -348,9 +531,10 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 							text, _ := m["text"].(string)
 							mt, _ := m["messageType"].(string)
 							if author == "bot" && mt == "" && text != "" {
-								// ChatHub often sends the first visible text as a full snapshot,
-								// followed by cursor deltas. Emit only the unseen suffix.
-								if err := emitSnapshot(text); err != nil {
+								// The authoritative channel: cumulative per message, and keyed
+								// per message so a later one does not reset an earlier one's
+								// baseline. Emit only the unseen suffix.
+								if err := snapshots.Add(messageSource(m, i), text); err != nil {
 									return Result{}, err
 								}
 							}
@@ -372,6 +556,9 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 							final = msg
 						}
 					}
+					if t := completionText(item); t != "" {
+						final = t
+					}
 				}
 				// completion frame often follows; keep reading a bit but we already have content
 				continue
@@ -383,9 +570,15 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 				}
 				// end of stream
 				log.Printf("chathub timing completion_frame_ms=%d streamed_text=%d events=%d", time.Since(payloadSentAt).Milliseconds(), streamed.Len(), len(events))
+				dumpFrames(os.Getenv("M365_CHATHUB_DUMP_FRAMES"), events)
 				text := final
 				if text == "" {
 					text = strings.Join(deltas, "")
+				}
+				if joined := strings.Join(deltas, ""); joined != text {
+					// The merge is heuristic; the completion frame is not. A mismatch
+					// means the streamed display differed from the answer returned.
+					log.Printf("chathub snapshot merge mismatch streamed=%d final=%d", len(joined), len(text))
 				}
 				return Result{
 					Text:           text,

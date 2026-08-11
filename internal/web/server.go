@@ -163,7 +163,7 @@ func (s *Server) Routes() http.Handler {
 
 func (s *Server) adminMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/admin/login" || r.URL.Path == "/api/admin/session" || r.URL.Path == "/api/admin/change-password" || r.URL.Path == "/api/admin/logout" || r.URL.Path == "/" || r.URL.Path == "/login" {
+		if r.URL.Path == "/api/health" || r.URL.Path == "/api/admin/login" || r.URL.Path == "/api/admin/session" || r.URL.Path == "/api/admin/change-password" || r.URL.Path == "/api/admin/logout" || r.URL.Path == "/" || r.URL.Path == "/login" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -822,17 +822,17 @@ type oaiReq struct {
 	Messages       []oaiMsg        `json:"messages"`
 	Stream         bool            `json:"stream"`
 	// optional account routing
-	User           string               `json:"user"`
-	AccountID      string               `json:"accountId"`
-	ConversationID string               `json:"conversation_id"`
-	SessionID      string               `json:"session_id"`
-	SessionKey     string               `json:"session_key"`
+	User           string `json:"user"`
+	AccountID      string `json:"accountId"`
+	ConversationID string `json:"conversation_id"`
+	SessionID      string `json:"session_id"`
+	SessionKey     string `json:"session_key"`
 	// CamelCase aliases mirroring the response metadata fields; clients echo
 	// m365.conversationId / m365.sessionId back verbatim.
-	ConversationIDC string `json:"conversationId,omitempty"`
-	SessionIDC      string `json:"sessionId,omitempty"`
-	Attachments    []chathub.Attachment `json:"attachments,omitempty"`
-	Tools          []chathub.Tool       `json:"tools,omitempty"`
+	ConversationIDC string               `json:"conversationId,omitempty"`
+	SessionIDC      string               `json:"sessionId,omitempty"`
+	Attachments     []chathub.Attachment `json:"attachments,omitempty"`
+	Tools           []chathub.Tool       `json:"tools,omitempty"`
 	// Legacy OpenAI-compatible clients still send functions/function_call.
 	Functions       []json.RawMessage `json:"functions,omitempty"`
 	ToolChoice      any               `json:"tool_choice,omitempty"`
@@ -890,7 +890,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		requestID = uuid.NewString()
 	}
 	startedAt := time.Now()
-	log.Printf("[req-trace] id=%s stage=http_start stream=%t", requestID, r.URL.Query().Get("stream") == "true")
+	log.Printf("[req-trace] id=%s stage=http_start", requestID)
 	defer func() {
 		log.Printf("[req-trace] id=%s stage=http_return total_ms=%d", requestID, time.Since(startedAt).Milliseconds())
 	}()
@@ -909,6 +909,10 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
+	// From the body, not the query string. Reading it from the query reported
+	// stream=false for every streaming client and sent four rounds of debugging
+	// after the wrong code path.
+	log.Printf("[req-trace] id=%s stage=body_stream stream=%t", requestID, body.Stream)
 	responseFormat := body.ResponseFormat
 	effort := body.ReasoningEffort
 	if body.Reasoning != nil && strings.TrimSpace(body.Reasoning.Effort) != "" {
@@ -930,6 +934,13 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	// Rebuild a protocol-neutral evidence ledger from actual tool calls/results.
 	// Round limits apply only to the current user turn; full history still informs evidence.
 	ledger := buildAgentLedger(body.Messages)
+	// Once tools have run, this turn is the report to the user. Its fenced blocks
+	// are documentation — "验收标准: ```bash go test ./...```" — not requests to
+	// run anything. Parsing them turned every summary that quoted a command into
+	// another tool call, which discarded the summary (a tool response carries
+	// content: nil) and sent the client back around the loop to produce another
+	// summary quoting the same command.
+	finalAnswerTurn := len(ledger.Completed) > 0
 	activeLedger := buildAgentLedger(activeMessages(body.Messages))
 	if err := activeLedger.CanContinue(maxToolRounds()); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -1016,7 +1027,16 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	}
 	planningMode := s.settings.get().ToolPlanningMode
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.settings.get().ChatTimeoutSeconds)*time.Second)
+	// ChatTimeoutSeconds budgets one upstream round trip, not the whole
+	// request. A routed turn makes at least two (router, then answer), so a
+	// single shared deadline let a 20s router leave the answer 100s and the
+	// answer was cut off mid-sentence when it ran out. Each ChatHub call gets
+	// its own budget instead; newChatContext starts a fresh one.
+	chatTimeout := time.Duration(s.settings.get().ChatTimeoutSeconds) * time.Second
+	newChatContext := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(r.Context(), chatTimeout)
+	}
+	ctx, cancel := newChatContext()
 	defer cancel()
 	account := chathub.Account{AccessToken: acc.AccessToken, OID: acc.OID, TID: acc.TID}
 	// The stream is opened by the actual response path below. Do not emit a
@@ -1071,6 +1091,8 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		answerPrompt = answerPrompt + "\n" + ledger.RouterContext() + "\nFINAL ANSWER RULE: Answer the user directly. If a tool is explicitly required, emit its structured call; otherwise return ordinary text."
 		log.Printf("[req-trace] id=%s stage=answer_start prompt_len=%d", requestID, len(answerPrompt))
 		answerReq := chathub.Request{Text: answerPrompt, Tone: tone, ConversationID: body.ConversationID, SessionID: body.SessionID, Attachments: body.Attachments, Tools: body.Tools, ToolChoice: body.ToolChoice}
+		answerCtx, cancelAnswer := newChatContext()
+		defer cancelAnswer()
 		id := "chatcmpl-" + uuid.NewString()
 		model := firstNonEmpty(body.Model, "m365-copilot")
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1109,7 +1131,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 			return nil
 		}
-		res, err := s.chat.ChatWithEvents(ctx, account, answerReq, func(ev chathub.StreamEvent) error {
+		res, err := s.chat.ChatWithEvents(answerCtx, account, answerReq, func(ev chathub.StreamEvent) error {
 			if ev.Kind == "tool" && ev.ToolName != "" && len(ev.Arguments) > 0 {
 				streamedTools = append(streamedTools, detectedToolCall{ID: "call_" + uuid.NewString(), Name: ev.ToolName, Arguments: ev.Arguments})
 				return nil
@@ -1120,9 +1142,11 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			text.WriteString(ev.Text)
 			pending.WriteString(ev.Text)
 			v := pending.String()
-			// If the text contains a bash block or a JSON command, don't emit it as text
-			// It will be caught by fencedToolCalls after the stream completes
-			if strings.Contains(v, "```bash") || strings.Contains(v, "\"command\"") {
+			// Hold back text that may still turn out to be a tool call, so it is
+			// not both streamed as prose and returned as a call. On the final
+			// answer turn nothing will be parsed, so holding it back would only
+			// stall the summary the user is waiting for.
+			if !finalAnswerTurn && (strings.Contains(v, "```bash") || strings.Contains(v, "\"command\"")) {
 				return nil
 			}
 			if i := strings.Index(v, "```"); i >= 0 {
@@ -1165,7 +1189,10 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			pending.WriteString(res.Text)
 		}
 		calls := streamedTools
-		if len(calls) == 0 {
+		if len(calls) == 0 && !finalAnswerTurn {
+			// Structured calls from the upstream event stream are always honoured;
+			// those are real decisions. Only text that merely resembles one is
+			// ignored here.
 			calls = fencedToolCalls(text.String(), toolMaps, body.ToolChoice)
 		}
 		if len(calls) > 0 {
@@ -1177,7 +1204,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			s.bindConversation(acc, &body, r, res, answerPrompt, startedAt)
 			return
 		}
-if err := emitText(pending.String()); err != nil {
+		if err := emitText(pending.String()); err != nil {
 			log.Printf("[req-trace] id=%s stage=stream_write err=%v", requestID, err)
 			return
 		}
@@ -1253,6 +1280,8 @@ APPLICATION_REQUEST_AND_EVIDENCE:
 		answerReq.Tools = body.Tools
 		answerReq.ToolChoice = body.ToolChoice
 	}
+	tailCtx, cancelTail := newChatContext()
+	defer cancelTail()
 	var res chathub.Result
 	if body.Stream {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1305,7 +1334,7 @@ APPLICATION_REQUEST_AND_EVIDENCE:
 		if err := sseRaw(r.Context(), w, flusher, ": connected\n\n"); err != nil {
 			return
 		}
-		res, err = s.chat.ChatWithReasoning(ctx, account, answerReq, onDelta, onReasoning)
+		res, err = s.chat.ChatWithReasoning(tailCtx, account, answerReq, onDelta, onReasoning)
 		if err == nil {
 			writeStreamFinish(r.Context(), w, flusher, id, model)
 			_ = sseRaw(r.Context(), w, flusher, "data: [DONE]\n\n")
@@ -1315,7 +1344,7 @@ APPLICATION_REQUEST_AND_EVIDENCE:
 			_ = sseRaw(r.Context(), w, flusher, "data: [DONE]\n\n")
 		}
 	} else {
-		res, err = s.chat.Chat(ctx, account, answerReq)
+		res, err = s.chat.Chat(tailCtx, account, answerReq)
 	}
 	if err != nil {
 		http.Error(w, upstreamError(err), http.StatusBadGateway)
@@ -1350,7 +1379,7 @@ APPLICATION_REQUEST_AND_EVIDENCE:
 		model = "m365-copilot"
 	}
 	id := "chatcmpl-" + uuid.NewString()
-	if calls := fencedToolCalls(res.Text, toolMaps, body.ToolChoice); len(calls) > 0 {
+	if calls := fencedToolCalls(res.Text, toolMaps, body.ToolChoice); len(calls) > 0 && !finalAnswerTurn {
 		calls = limitToolCalls(calls, adaptiveToolCallLimit(calls, configuredToolCallLimit(s.settings)))
 		_ = writeToolResponse(w, id, model, body.Stream, calls, res)
 		return

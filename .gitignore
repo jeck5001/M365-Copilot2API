@@ -48,3 +48,7 @@ AGENTS.md
 
 # WIP build during this session
 /m365-copilot2api.new*
+
+# Session scratch
+/.test-tmp/
+PROGRESS.md

@@ -44,6 +44,10 @@ func (s *Server) streamResponsesAdapter(w http.ResponseWriter, r *http.Request, 
 	r2.Body = io.NopCloser(bytes.NewReader(b))
 	r2.ContentLength = int64(len(b))
 	pr, pw := io.Pipe()
+	// Returning early (client disconnect) stops draining the pipe. Closing the
+	// read half unblocks the inner writer instead of parking that goroutine,
+	// and its ChatHub connection, on a write nobody will ever read.
+	defer pr.Close()
 	irw := &pipeResponseWriter{h: make(http.Header), w: pw}
 	innerDone := make(chan struct{})
 	go func() {
@@ -51,7 +55,14 @@ func (s *Server) streamResponsesAdapter(w http.ResponseWriter, r *http.Request, 
 		_ = pw.Close()
 		close(innerDone)
 	}()
+	translateChatStreamToResponses(w, r, model, o, pr, innerDone, func() int { return irw.status })
+}
 
+// translateChatStreamToResponses rewrites the internal OpenAI chat SSE in src as
+// Responses events. innerDone closes when the producer is finished and
+// innerStatus reports the status it wrote, so transport failures can be told
+// apart from a turn that streamed cleanly.
+func translateChatStreamToResponses(w http.ResponseWriter, r *http.Request, model string, o oaiReq, src io.Reader, innerDone <-chan struct{}, innerStatus func() int) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -72,7 +83,8 @@ func (s *Server) streamResponsesAdapter(w http.ResponseWriter, r *http.Request, 
 		ItemID               string
 	}
 	calls := map[int]*tcState{}
-	scanner := bufio.NewScanner(pr)
+	streamErr := ""
+	scanner := bufio.NewScanner(src)
 	scanner.Buffer(make([]byte, 4096), 2<<20)
 	for scanner.Scan() {
 		if r.Context().Err() != nil {
@@ -84,6 +96,17 @@ func (s *Server) streamResponsesAdapter(w http.ResponseWriter, r *http.Request, 
 		}
 		var chunk map[string]any
 		if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk) != nil {
+			continue
+		}
+		// A failed upstream turn arrives as an error frame after any deltas it
+		// managed to emit. Without capturing it the partial text below is
+		// reported as response.completed, so a chat truncated at the timeout
+		// looks to the client like a finished answer.
+		if errFrame, ok := chunk["error"].(map[string]any); ok {
+			streamErr, _ = errFrame["message"].(string)
+			if streamErr == "" {
+				streamErr = "upstream stream failed"
+			}
 			continue
 		}
 		choices, _ := chunk["choices"].([]any)
@@ -138,8 +161,8 @@ func (s *Server) streamResponsesAdapter(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	<-innerDone
-	if scanner.Err() != nil || irw.status >= http.StatusBadRequest {
-		status := irw.status
+	if scanner.Err() != nil || innerStatus() >= http.StatusBadRequest {
+		status := innerStatus()
 		if status == 0 {
 			status = http.StatusBadGateway
 		}
@@ -148,6 +171,16 @@ func (s *Server) streamResponsesAdapter(w http.ResponseWriter, r *http.Request, 
 			"response": map[string]any{
 				"id": id, "object": "response", "status": "failed", "model": model,
 				"error": map[string]any{"code": status, "message": "inner chat request failed"},
+			},
+		})
+		return
+	}
+	if streamErr != "" {
+		emit("response.failed", map[string]any{
+			"type": "response.failed",
+			"response": map[string]any{
+				"id": id, "object": "response", "status": "failed", "model": model,
+				"error": map[string]any{"code": "upstream_stream_failed", "message": streamErr},
 			},
 		})
 		return

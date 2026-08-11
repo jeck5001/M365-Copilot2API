@@ -26,6 +26,47 @@ type responsesRequest struct {
 
 const customExecWorkspaceInstruction = `You are operating through the caller's local OpenCode execution bridge. Never use, request, or mention Microsoft 365/Copilot native tools. The only permitted execution tool is the caller-provided custom exec tool. The executor already starts in the caller-selected project workspace. Use relative paths only; never guess, cd to, or write under /root, /workspace, /tmp, or any other absolute project path. Inspect pwd and ls before changes. Do not create files outside the current working directory. Never claim a file was created, modified, or verified until custom exec returns a successful result. After every execution, use custom exec to verify the result.`
 
+// codexInputTools flattens Codex "additional_tools" input items into a flat
+// tool list. Recent Codex builds stop sending top-level tools and instead pass
+// them as an input item whose tools are grouped into namespace containers; read
+// only from r.Tools and every request arrives with zero tools, so the gateway
+// never routes a tool call and the model answers in prose instead.
+func codexInputTools(input any) []map[string]any {
+	items, ok := input.([]any)
+	if !ok {
+		return nil
+	}
+	var out []map[string]any
+	var walk func(any)
+	walk = func(v any) {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return
+		}
+		// Namespace containers nest their members under "tools"; only leaves
+		// carry an invocable name.
+		if nested, ok := m["tools"].([]any); ok {
+			for _, child := range nested {
+				walk(child)
+			}
+			return
+		}
+		if name, _ := m["name"].(string); name != "" {
+			out = append(out, m)
+		}
+	}
+	for _, raw := range items {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if typ, _ := m["type"].(string); typ == "additional_tools" {
+			walk(m)
+		}
+	}
+	return out
+}
+
 func (r responsesRequest) openAI() (oaiReq, error) {
 	o := oaiReq{Model: r.Model, AccountID: r.AccountID, Stream: r.Stream, ToolChoice: r.ToolChoice, User: r.User}
 	if instructions := strings.TrimSpace(r.Instructions); instructions != "" {
@@ -35,7 +76,6 @@ func (r responsesRequest) openAI() (oaiReq, error) {
 		o.Reasoning = r.Reasoning
 		o.ReasoningEffort = r.Reasoning.Effort
 	}
-	var inputTools []map[string]any
 	switch v := r.Input.(type) {
 	case string:
 		if v == "" {
@@ -51,10 +91,9 @@ func (r responsesRequest) openAI() (oaiReq, error) {
 			typ, _ := m["type"].(string)
 			switch typ {
 			case "additional_tools":
-				// Codex Desktop ships its tool catalog as an input item instead of
-				// the top-level tools field. Without this the request reaches
-				// ChatHub with zero tools and the model answers from imagination.
-				inputTools = append(inputTools, flattenAdditionalTools(m)...)
+				// Tool definitions, not conversation content. codexInputTools
+				// picks them up; flattening them into the prompt would only add
+				// tens of KB of schema prose the model cannot act on.
 				continue
 			case "function_call_progress":
 				// Progress is deliberately not converted into an assistant/tool
@@ -104,7 +143,7 @@ func (r responsesRequest) openAI() (oaiReq, error) {
 	default:
 		return o, fmt.Errorf("input must be string or array")
 	}
-	tools := append(append([]map[string]any(nil), r.Tools...), inputTools...)
+	tools := append(append([]map[string]any(nil), r.Tools...), codexInputTools(r.Input)...)
 	hasCustomExec := false
 	for _, t := range tools {
 		typ, _ := t["type"].(string)
@@ -137,30 +176,6 @@ func (r responsesRequest) openAI() (oaiReq, error) {
 		o.Messages = append([]oaiMsg{{Role: "system", Content: customExecWorkspaceInstruction}}, o.Messages...)
 	}
 	return o, nil
-}
-
-// flattenAdditionalTools unwraps a Codex `additional_tools` input item. Its
-// tools list mixes plain tool definitions with `namespace` groups that nest a
-// further tools array, so collect the leaves from both shapes.
-func flattenAdditionalTools(item map[string]any) []map[string]any {
-	raw, _ := item["tools"].([]any)
-	out := make([]map[string]any, 0, len(raw))
-	for _, entry := range raw {
-		t, ok := entry.(map[string]any)
-		if !ok {
-			continue
-		}
-		if nested, ok := t["tools"].([]any); ok {
-			for _, child := range nested {
-				if c, ok := child.(map[string]any); ok {
-					out = append(out, c)
-				}
-			}
-			continue
-		}
-		out = append(out, t)
-	}
-	return out
 }
 
 type anthropicMessage struct {
