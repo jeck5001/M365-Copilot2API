@@ -1,5 +1,7 @@
 # M365 Copilot2API
 
+> 本 README 为项目主文档，使用中文维护。Web 控制台的中英文 i18n 仅用于控制台界面语言切换。
+
 <p align="center">
   <img src="https://img.shields.io/github/license/HEXUXIU/M365-Copilot2API" alt="License">
   <img src="https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go" alt="Go Version">
@@ -200,6 +202,20 @@ docker compose up -d --build
 | `M365_PROXY_HEALTH_URL` | 默认探测地址 | 代理健康检查目标 |
 | `M365_CLIENT_ID` | 内置 | Azure 应用 Client ID |
 | `M365_AUTHORITY` / `M365_REDIRECT_URI` / `M365_SCOPE` | 内置 | OAuth 端点自定义覆盖 |
+| `M365_BROWSER_CLIENT_ID` / `M365_BROWSER_AUTHORITY` / `M365_BROWSER_REDIRECT_URI` / `M365_BROWSER_SCOPE` | 内置 | 仅用于浏览器 PKCE 的 OAuth 配置；authority 可使用 `common`、`organizations` 或 `consumers` |
+| `M365_DEVICE_CLIENT_ID` / `M365_DEVICE_AUTHORITY` / `M365_DEVICE_SCOPE` | 内置 | 仅用于 Device Code 的 OAuth 配置 |
+
+Loopback 回调需显式启用。请先在 Azure 应用注册中登记完全一致的 loopback URI，例如 `http://127.0.0.1:4141/api/auth/callback`，再同时设置 `M365_BROWSER_CLIENT_ID` 和 `M365_BROWSER_REDIRECT_URI`。内置第一方客户端可能会因 loopback URI 未注册而返回 `AADSTS50011`，因此默认仍使用兼容性更好的 `nativeclient` 重定向，并由用户手动粘贴回调 URL。
+
+选择 `common`、`organizations` 或 `consumers` 只会控制 Microsoft 可提供的账号类别，不会绕过 Microsoft 身份验证、多重身份验证（MFA）、租户策略、账号类型限制、授权同意、许可证或服务资格检查。自定义 Client ID 不保证能够访问私有 Substrate scope；个人 Microsoft 账号成功登录也不代表该账号具备 M365 Copilot 服务资格。
+
+### 工具与网络搜索
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `M365_ENABLE_WEB_SEARCH` | 开 | 自动注入 `web_search` 声明（`0` / `false` / `off` 关闭）。开启后每次对话都会像 M365 网页版那样注册 BingWebSearch 内建插件，模型可基于实时搜索结果作答 |
+
+> 说明：`web_search` 是服务端内建工具（`BingWebSearch`），不会出现在下发给客户端的 `tool_calls` 里；搜索结果以 `SearchResults` 引用形式出现在回答流中。客户端若要自行声明 `web_search`（type 或 function name），网关不会重复注入。
 
 ### 数据文件
 
