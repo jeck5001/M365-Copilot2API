@@ -1481,6 +1481,7 @@ APPLICATION_REQUEST_AND_EVIDENCE:
 		writeUpstreamError(w, err)
 		return
 	}
+	s.accountPool.MarkSuccess(acc.ID)
 	if body.Stream {
 		if body.User != "" && res.ConversationID != "" {
 			s.userSessions.Put(body.User, res.ConversationID, res.SessionID, acc.ID)
