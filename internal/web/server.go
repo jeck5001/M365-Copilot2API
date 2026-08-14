@@ -523,6 +523,8 @@ func (s *Server) provisionAccount(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusInternalServerError, "upsert_error", err.Error())
 		return
 	}
+	// Re-initialize the M365 cloud client so a freshly added account is picked up.
+	s.InitM365CloudClient()
 	jsonOut(w, map[string]any{"status": "provisioned", "account": map[string]any{
 		"id": acc.ID, "email": acc.Email, "displayName": acc.DisplayName,
 		"status": acc.Status, "expiresAt": acc.ExpiresAt,
@@ -662,6 +664,8 @@ func (s *Server) callbackPKCE(w http.ResponseWriter, r *http.Request) {
 	p.Account = map[string]any{"id": acc.ID, "email": acc.Email, "displayName": acc.DisplayName, "status": acc.Status, "oid": acc.OID, "tid": acc.TID}
 	s.pkce[state] = p
 	s.mu.Unlock()
+	// Re-initialize the M365 cloud client so a freshly added account is picked up.
+	s.InitM365CloudClient()
 	// Browser loopback callbacks should finish in a friendly page instead of
 	// displaying a raw JSON response. Keep JSON for the manual/API flow.
 	if strings.HasPrefix(p.RedirectURI, "http://127.0.0.1:") || strings.HasPrefix(p.RedirectURI, "http://localhost:") {
