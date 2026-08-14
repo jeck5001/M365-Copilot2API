@@ -1,0 +1,35 @@
+# NAS deployment via GitHub Actions-built image.
+#
+# Usage on the NAS (run from a directory containing this file):
+#   docker compose -f docker-compose.nas.yml up -d
+#
+# The image is published to GHCR by .github/workflows/docker.yml on every push
+# to main. Override the image with an env var if you use a different owner:
+#   IMAGE=ghcr.io/<owner>/m365-copilot2api:latest docker compose -f docker-compose.nas.yml up -d
+services:
+  m365-copilot2api:
+    image: ${IMAGE:-ghcr.io/jeck5001/m365-copilot2api:latest}
+    container_name: m365-copilot2api
+    restart: unless-stopped
+    ports:
+      # Bind 0.0.0.0 so the gateway is reachable from the LAN/WAN. Restrict it
+      # with M365_BIND if you only want loopback access:
+      #   M365_BIND=127.0.0.1 docker compose -f docker-compose.nas.yml up -d
+      - "${M365_BIND:-0.0.0.0}:4141:4141"
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      M365_LISTEN: 0.0.0.0:4141
+      M365_DATA_DIR: /data
+      M365_CONFIG: /data/accounts.json
+      M365_TOKEN_CACHE: /data/token-cache.json
+      M365_SESSION_CACHE: /data/sessions.json
+      M365_API_KEYS: /data/api-keys.json
+      M365_ADMIN_PASSWORD_FILE: /data/admin-password
+      M365_ADMIN_PASSWORD_BOOTSTRAP_FILE: /run/secrets/m365_admin_password
+      M365_CHAT_TIMEOUT_SECONDS: "120"
+      M365_IMAGE_TIMEOUT_SECONDS: "150"
+      # Raw ChatHub frame capture, off unless a path is given:
+      M365_CHATHUB_DUMP_FRAMES: "${M365_CHATHUB_DUMP_FRAMES:-}"
+    volumes:
+      - ./data:/data
+      - ./secrets/m365_admin_password:/run/secrets/m365_admin_password:ro
