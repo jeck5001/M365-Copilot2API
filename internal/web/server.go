@@ -682,8 +682,6 @@ func (s *Server) resolveAccount(accountID string) (auth.AccountToken, error) {
 			return auth.AccountToken{}, fmt.Errorf("no accounts; login first")
 		}
 		accountID = acc.ID
-		// Round-robin may land on a cooling-down or auth-failed account;
-		// walk the pool for the next healthy one without infinite loops.
 		for i := 0; !s.accountPool.Available(accountID) && i < maxAccountProbe; i++ {
 			acc, ok = s.tokens.Next()
 			if !ok {
@@ -692,7 +690,12 @@ func (s *Server) resolveAccount(accountID string) (auth.AccountToken, error) {
 			accountID = acc.ID
 		}
 		if !s.accountPool.Available(accountID) {
-			return auth.AccountToken{}, fmt.Errorf("all accounts are cooling down or failing auth; try again later")
+			until := s.accountPool.EarliestRecovery()
+			retry := int(time.Until(until).Seconds())
+			if retry < 5 {
+				retry = 5
+			}
+			return auth.AccountToken{}, &UpstreamHTTPError{Status: 429, RetryAfter: retry, Body: "all accounts are cooling down; try again later"}
 		}
 	}
 	acc, err := s.tokens.EnsureValid(accountID)
@@ -814,11 +817,10 @@ func (s *Server) chatOnce(w http.ResponseWriter, r *http.Request) {
 	}
 	acc, err := s.resolveAccount(body.AccountID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeUpstreamError(w, err)
 		return
 	}
 	if acc.OID == "" || acc.TID == "" {
-		// try extract from access token claims on the fly
 		if claimsOID, claimsTID := extractOIDTID(acc.AccessToken); claimsOID != "" {
 			acc.OID = claimsOID
 			acc.TID = claimsTID
@@ -932,7 +934,7 @@ func (s *Server) adminModelTest(w http.ResponseWriter, r *http.Request) {
 	}
 	acc, err := s.resolveAccount("")
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "account_error", err.Error())
+		writeUpstreamError(w, err)
 		return
 	}
 	if acc.OID == "" || acc.TID == "" {
@@ -1170,7 +1172,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	acc, err := s.resolveAccount(accountID)
 	if err != nil {
 		log.Printf("[account-route] resolve failed requested=%q err=%v", accountID, err)
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeUpstreamError(w, err)
 		return
 	}
 	log.Printf("[account-route] selected id=%q email=%q token_present=%t oid_present=%t tid_present=%t", acc.ID, acc.Email, acc.AccessToken != "", acc.OID != "", acc.TID != "")
@@ -1423,9 +1425,6 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.accountPool.MarkSuccess(acc.ID)
-		// Some ChatHub updates contain no text event and place the completed
-		// answer only in the final Result. Recover it before deciding that the
-		// response is empty; this also preserves fenced-tool parsing.
 		if text.Len() == 0 && strings.TrimSpace(res.Text) != "" {
 			text.WriteString(res.Text)
 			pending.WriteString(res.Text)
@@ -1438,6 +1437,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			calls = fencedToolCalls(text.String(), toolMaps, body.ToolChoice)
 		}
 		if len(calls) > 0 {
+			log.Printf("[req-trace] id=%s stage=tool_calls_detected count=%d names=%v", requestID, len(calls), func() []string { var n []string; for _, c := range calls { n = append(n, c.Name) }; return n }())
 			calls = limitToolCalls(calls, adaptiveToolCallLimit(calls, configuredToolCallLimit(s.settings)))
 			_ = writeToolResponse(w, id, model, true, calls, chathub.Result{Text: text.String()})
 			if body.User != "" && res.ConversationID != "" {
@@ -1464,8 +1464,29 @@ writeStreamFinish(r.Context(), w, flusher, id, model)
 		routePrompt := modelToolRouterPrompt(prompt+"\n"+ledger.RouterContext(), routeMaps, body.ToolChoice)
 		routeRes, routeErr := s.chat.Chat(ctx, account, chathub.Request{Text: routePrompt, Tone: tone, Attachments: body.Attachments})
 		if routeErr != nil {
-			http.Error(w, "tool router: "+routeErr.Error(), http.StatusBadGateway)
-			return
+			s.accountPool.MarkFailure(acc.ID, routeErr, rateLimitCooldown)
+			if IsRateLimited(routeErr) || IsAuthFailure(routeErr) {
+				next, nerr := s.nextHealthyAccount(acc.ID)
+				if nerr == nil {
+					ctx2, cancel2 := context.WithTimeout(r.Context(), time.Duration(s.settings.get().ChatTimeoutSeconds)*time.Second)
+					defer cancel2()
+					if res2, err2 := s.chat.Chat(ctx2, chathub.Account{AccessToken: next.AccessToken, OID: next.OID, TID: next.TID}, chathub.Request{Text: routePrompt, Tone: tone, Attachments: body.Attachments}); err2 == nil {
+						routeRes, routeErr = res2, nil
+						acc = next
+					} else {
+						s.accountPool.MarkFailure(next.ID, err2, rateLimitCooldown)
+					}
+				}
+			}
+			if routeErr != nil {
+				msg := upstreamError(routeErr)
+				if IsRateLimited(routeErr) {
+					msg = "upstream is rate limiting; try again shortly"
+				}
+				writeOpenAIError(w, http.StatusBadGateway, "tool_router_error", msg)
+				return
+			}
+			s.accountPool.MarkSuccess(acc.ID)
 		}
 		calls, parsed := parseModelToolDecision(routeRes.Text, routeMaps, body.ToolChoice)
 		if !parsed {
@@ -1773,7 +1794,8 @@ writeStreamFinish(r.Context(), w, flusher, id, model)
 	if len(res.Images) > 0 {
 		parts := []any{map[string]any{"type": "text", "text": res.Text}}
 		for _, u := range res.Images {
-			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": u}})
+			du, _ := downloadImageAsDataURIWithToken(u, acc.AccessToken)
+			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": du}})
 		}
 		content = parts
 	}

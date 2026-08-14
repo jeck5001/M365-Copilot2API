@@ -25,6 +25,15 @@ import (
 // Callers must independently probe the account before marking it unhealthy.
 var ErrRateLimitNotice = errors.New("upstream rate-limit notice")
 
+var chTrace = os.Getenv("M365_TRACE") == "1"
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a
@@ -422,6 +431,9 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		if d == "" {
 			return nil
 		}
+		if chTrace {
+			log.Printf("[trace:emitDelta] len=%d streamed=%d preview=%q", len(d), streamed.Len()+len(d), truncate(d, 80))
+		}
 		if streamed.Len() == 0 {
 			log.Printf("chathub timing first_delta_ms=%d len=%d", time.Since(payloadSentAt).Milliseconds(), len(d))
 		}
@@ -485,6 +497,9 @@ snapshots := newSnapshotEmitter(streamed.String, emitDelta)
 			part = strings.TrimSpace(part)
 			if part == "" {
 				continue
+			}
+			if chTrace {
+				log.Printf("[trace:ws] frame_len=%d preview=%q", len(part), truncate(part, 120))
 			}
 			events = append(events, json.RawMessage(append([]byte(nil), part...)))
 			var obj map[string]any
@@ -596,10 +611,12 @@ if t := completionText(item); t != "" {
 				if errObj, ok := obj["error"].(map[string]any); ok {
 					return Result{}, fmt.Errorf("chathub completion error: %v", errObj)
 				}
-				// end of stream
 				log.Printf("chathub timing completion_frame_ms=%d streamed_text=%d events=%d", time.Since(payloadSentAt).Milliseconds(), streamed.Len(), len(events))
-				dumpFrames(os.Getenv("M365_CHATHUB_DUMP_FRAMES"), events)
-				text := final
+dumpFrames(os.Getenv("M365_CHATHUB_DUMP_FRAMES"), events)
+				text := streamed.String()
+				if text == "" {
+					text = final
+				}
 				if text == "" {
 					text = strings.Join(deltas, "")
 				}
@@ -916,4 +933,28 @@ func chatPayload(text, sessionID, conversationID, requestID, tone string, firstT
 	b1, _ := json.Marshal(chat)
 	b2, _ := json.Marshal(metrics)
 	return string(b1) + rs + string(b2) + rs
+}
+
+func longestCommonPrefix(a, b string) int {
+	minLen := len(a)
+	if len(b) < minLen {
+		minLen = len(b)
+	}
+	i := 0
+	for i < minLen && a[i] == b[i] {
+		i++
+	}
+	return i
+}
+
+func longestCommonSuffix(a, b string) int {
+	ai := len(a) - 1
+	bi := len(b) - 1
+	n := 0
+	for ai >= 0 && bi >= 0 && a[ai] == b[bi] {
+		n++
+		ai--
+		bi--
+	}
+	return n
 }
