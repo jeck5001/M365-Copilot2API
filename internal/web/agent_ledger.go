@@ -195,25 +195,19 @@ func completionEvidenceAllows(answer string, l agentLedger) bool {
 	if len(l.Pending) > 0 {
 		return false
 	}
+	if len(l.Completed) > 0 {
+		return true
+	}
+	if !unsupportedSuccess.MatchString(answer) {
+		return true
+	}
 	low := strings.ToLower(answer)
-	failureKeywords := []string{"cannot confirm", "not confirmed", "unable to confirm", "no tool result", "not completed", "failed", "i cannot", "i'm unable", "i'm not able", "i don't have", "i don't currently", "i apologize", "cannot", "unable", "not able", "could not", "was not able", "does not have", "do not have", "not available", "not supported", "can't", "won't"}
-	hasFailure := false
-	for _, h := range failureKeywords {
+	for _, h := range []string{"cannot confirm", "not confirmed", "unable to confirm", "no tool result", "not completed", "failed"} {
 		if strings.Contains(low, h) {
-			hasFailure = true
-			break
+			return true
 		}
 	}
-	if len(l.Completed) > 0 {
-		return !hasFailure
-	}
-	// No tool results at all: an unsupported "success" claim without any tool
-	// evidence must not pass the completion guard. An explicit inability to
-	// confirm is the only unverified case that may pass.
-	if unsupportedSuccess.MatchString(answer) {
-		return false
-	}
-	return true
+	return false
 }
 func completedCallIDs(l agentLedger) []string {
 	o := make([]string, 0, len(l.Completed))
