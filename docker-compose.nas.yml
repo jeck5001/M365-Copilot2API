@@ -7,10 +7,27 @@
 # to main. Override the image with an env var if you use a different owner:
 #   IMAGE=ghcr.io/<owner>/m365-copilot2api:latest docker compose -f docker-compose.nas.yml up -d
 services:
+  # One-shot helper that fixes ownership of the bind-mounted ./data directory
+  # before the app starts. The app image runs as the unprivileged user m365
+  # (uid=100, gid=101); on a fresh NAS the host ./data is usually owned by
+  # root, so the app would fail to write (e.g. "administrator password could
+  # not be saved"). This runs once as root and chowns the mount.
+  init-data:
+    image: ${IMAGE:-ghcr.io/jeck5001/m365-copilot2api:latest}
+    container_name: m365-init-data
+    user: root
+    entrypoint: ["sh", "-c", "mkdir -p /data && chown -R 100:101 /data"]
+    volumes:
+      - ./data:/data
+    restart: "no"
+
   m365-copilot2api:
     image: ${IMAGE:-ghcr.io/jeck5001/m365-copilot2api:latest}
     container_name: m365-copilot2api
     restart: unless-stopped
+    depends_on:
+      init-data:
+        condition: service_completed_successfully
     ports:
       # Bind 0.0.0.0 so the gateway is reachable from the LAN/WAN. Restrict it
       # with M365_BIND if you only want loopback access:
