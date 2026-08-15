@@ -103,6 +103,9 @@ body{background:var(--bg);color:var(--text);font-family:"Inter","SF Pro Display"
 .table tr:hover td{background:rgba(0,113,227,0.03)}
 @media(prefers-color-scheme:dark){.table tr:hover td{background:rgba(10,132,255,0.04)}}
 .table tr:last-child td{border-bottom:0}
+.conv-row{cursor:pointer}
+.conv-link{display:block;max-width:360px;padding:0;border:0;background:transparent;color:var(--accent);font:inherit;font-weight:600;text-align:left;white-space:normal;overflow-wrap:anywhere;cursor:pointer}
+.conv-meta{font-size:11px;color:var(--muted);margin-top:3px}
 
 /* Notice */
 .notice{position:fixed;right:24px;bottom:24px;background:var(--primary);color:var(--bg);padding:12px 18px;border-radius:var(--radius-sm);display:none;box-shadow:var(--shadow-lg);font-weight:600;font-size:13px;z-index:99;animation:slideUp .3s var(--ease-out)}
@@ -566,7 +569,7 @@ if (response.output_text) {
         </div>
         <div class="card">
           <div class="card-head"><span class="card-title">Conversation list</span></div>
-          <table class="table"><thead><tr><th>Conversation ID</th><th>Name</th><th>Created</th><th>Actions</th></tr></thead><tbody id="convRows"><tr><td colspan="4" class="empty">Loading...</td></tr></tbody></table>
+          <table class="table"><thead><tr><th>Name</th><th>Messages</th><th>Account</th><th>Last updated</th><th>Actions</th></tr></thead><tbody id="convRows"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody></table>
         </div>
       </section>
 
@@ -678,6 +681,7 @@ if (response.output_text) {
 const $=id=>document.getElementById(id);
 const pages={dashboard:'Dashboard',usage:'Usage',accounts:'Accounts',apikeys:'API Keys',conversations:'Conversations',proxies:'Proxy Pool',modeltest:'Model Test',settings:'Settings'};
 const localeStorageKey='m365_locale';
+const localeSelectionKey='m365_locale_selected';
 const SUPPORTED_LOCALES=['en','zh-CN','zh-TW','ja','ko','es','fr','de','pt-BR','ru','ar'];
 const localeText={
   'Administrator Login': {'zh-CN':'管理员登录','zh-TW':'管理員登入','ja':'管理者ログイン','ko':'관리자 로그인','es':'Inicio de sesión de administrador','fr':'Connexion administrateur','de':'Administrator-Anmeldung','pt-BR':'Login de administrador','ru':'Вход администратора','ar':'تسجيل دخول المسؤول'},
@@ -796,6 +800,9 @@ const localeText={
   'Clear': {'zh-CN':'清空','zh-TW':'清空','ja':'クリア','ko':'지우기','es':'Borrar','fr':'Effacer','de':'Leeren','pt-BR':'Limpar','ru':'Очистить','ar':'مسح'},
   'Conversation list': {'zh-CN':'对话列表','zh-TW':'對話列表','ja':'会話一覧','ko':'대화 목록','es':'Lista de conversaciones','fr':'Liste des conversations','de':'Unterhaltungsliste','pt-BR':'Lista de conversas','ru':'Список разговоров','ar':'قائمة المحادثات'},
   'Conversation ID': {'zh-CN':'对话 ID','zh-TW':'對話 ID','ja':'会話 ID','ko':'대화 ID','es':'ID de conversación','fr':'ID de conversation','de':'Unterhaltungs-ID','pt-BR':'ID da conversa','ru':'ID разговора','ar':'معرف المحادثة'},
+  'Messages': {'zh-CN':'消息数','zh-TW':'訊息數','ja':'メッセージ数','ko':'메시지 수','es':'Mensajes','fr':'Messages','de':'Nachrichten','pt-BR':'Mensagens','ru':'Сообщения','ar':'الرسائل'},
+  'Last updated': {'zh-CN':'最近更新','zh-TW':'最近更新','ja':'最終更新','ko':'최근 업데이트','es':'Última actualización','fr':'Dernière mise à jour','de':'Zuletzt aktualisiert','pt-BR':'Última atualização','ru':'Последнее обновление','ar':'آخر تحديث'},
+  'View': {'zh-CN':'查看','zh-TW':'檢視','ja':'表示','ko':'보기','es':'Ver','fr':'Voir','de':'Anzeigen','pt-BR':'Ver','ru':'Открыть','ar':'عرض'},
   'Configure outbound proxies with http / https / socks5 and automatic failover': {'zh-CN':'配置出口代理，支持 http / https / socks5，故障自动切换','zh-TW':'設定出口代理，支援 http / https / socks5，故障自動切換','ja':'http / https / socks5 の送信プロキシを設定し、障害時は自動フェイルオーバー','ko':'http / https / socks5 발신 프록시 구성 및 자동 장애 조치','es':'Configure proxies de salida con http / https / socks5 y conmutación automática por error','fr':'Configurez des proxys sortants http / https / socks5 avec bascule automatique','de':'Ausgehende Proxys mit http / https / socks5 und automatischem Failover konfigurieren','pt-BR':'Configure proxies de saída com http / https / socks5 e failover automático','ru':'Настройте исходящие прокси http / https / socks5 с автоматическим переключением','ar':'قم بتكوين بروكسيات الخروج http / https / socks5 مع التبديل التلقائي'},
   'Check all': {'zh-CN':'全部健康检查','zh-TW':'全部健康檢查','ja':'すべてチェック','ko':'전체 확인','es':'Comprobar todo','fr':'Tout vérifier','de':'Alle prüfen','pt-BR':'Verificar tudo','ru':'Проверить все','ar':'فحص الكل'},
   'Add proxy': {'zh-CN':'添加代理','zh-TW':'新增代理','ja':'プロキシを追加','ko':'프록시 추가','es':'Añadir proxy','fr':'Ajouter un proxy','de':'Proxy hinzufügen','pt-BR':'Adicionar proxy','ru':'Добавить прокси','ar':'إضافة بروكسي'},
@@ -849,7 +856,15 @@ const localeText={
   'Testing…': {'zh-CN':'测试中…','zh-TW':'測試中…','ja':'テスト中…','ko':'테스트 중…','es':'Probando…','fr':'Test en cours…','de':'Wird getestet…','pt-BR':'Testando…','ru':'Тестирование…','ar':'جارٍ الاختبار…'},
   'Failed': {'zh-CN':'失败','zh-TW':'失敗','ja':'失敗','ko':'실패','es':'Fallido','fr':'Échec','de':'Fehlgeschlagen','pt-BR':'Falhou','ru':'Ошибка','ar':'فشل'}
 };
-let currentLocale='en';
+function preferredLocale(){
+  try{
+    const stored=localStorage.getItem(localeStorageKey);
+    if(stored==='en'&&localStorage.getItem(localeSelectionKey)==='1')return 'en';
+    if(stored&&stored!=='en'&&SUPPORTED_LOCALES.includes(stored))return stored;
+  }catch(e){}
+  return 'zh-CN';
+}
+let currentLocale=preferredLocale();
 let localeObserver=null;
 function localeReverse(){const out={};Object.entries(localeText).forEach(([en,v])=>{if(v&&typeof v==='object'){Object.values(v).forEach(t=>{if(t&&!out[t])out[t]=en;});}else if(v&&!out[v]){out[v]=en;}});return out;}
 const localeTextReverse=localeReverse();
@@ -910,9 +925,13 @@ function applyLocale(locale){
   translatePage();
   if(!localeObserver){localeObserver=new MutationObserver(()=>translatePage());localeObserver.observe(document.body,{childList:true,subtree:true,characterData:true});}
 }
-try{const l=localStorage.getItem(localeStorageKey);currentLocale=SUPPORTED_LOCALES.includes(l)?l:'en';}catch(e){}
 applyLocale(currentLocale);
-document.addEventListener('change',e=>{if(e.target?.id==='languageSelect')applyLocale(e.target.value);});
+document.addEventListener('change',e=>{
+  if(e.target?.id==='languageSelect'){
+    try{localStorage.setItem(localeSelectionKey,'1');}catch(err){}
+    applyLocale(e.target.value);
+  }
+});
 let pkceTimer=null;
 
 function showNotice(msg,type='info'){
@@ -984,13 +1003,7 @@ $('loginForm')?.addEventListener('submit',async e=>{
   e.preventDefault();
   try{
     const d=await api('/api/admin/login',{method:'POST',body:JSON.stringify({password:$('loginPassword').value})});
-    if(d.must_change_password){
-      const np=prompt('You must change the default password before continuing.\nEnter new password (min 6 characters):');
-      if(!np||np.length<6){showNotice('Password must be at least 6 characters','error');return;}
-      await api('/api/admin/change-password',{method:'POST',body:JSON.stringify({current_password:$('loginPassword').value,new_password:np})});
-      showNotice('Password changed. Please log in again with the new password.','success');
-      return;
-    }
+    if(d.must_change_password){location.replace('/login');return;}
     $('login').style.display='none';$('app').style.display='flex';
     showPage('dashboard');loadStats();
     showNotice('Logged in successfully','success');
@@ -1069,7 +1082,7 @@ async function startPKCE(){
     $('callbackInput').dataset.state=d.state;
     const popup=window.open(d.url,'pkce','width=600,height=800');
     if(!popup){$('authStatus').innerHTML='<div class="highlight-box warning"><div class="highlight-box-title"><i data-lucide="alert-circle" style="width:14px;height:14px"></i>Popup blocked by browser</div><p>Please allow popups for this site, then click "Start authorization" again.</p></div>';lucide.createIcons();return;}
-    $('authStatus').innerHTML='<div class="highlight-box"><div class="highlight-box-title"><i data-lucide="info" style="width:14px;height:14px"></i>Authorization page opened in a new window</div><p>Complete the sign-in in the popup. After signing in, the popup will show a blank or error page — this is normal. Copy the <b>full URL from the popup\'s address bar</b> and paste it into the Callback URL field below.</p></div>';
+    $('authStatus').innerHTML='<div class="highlight-box"><div class="highlight-box-title"><i data-lucide="info" style="width:14px;height:14px"></i>Authorization page opened in a new window</div><p>Complete the sign-in in the popup. After signing in, the popup will show a blank or error page — this is normal. Copy the <b>full URL from the popup&#39;s address bar</b> and paste it into the Callback URL field below.</p></div>';
     $('callbackInput').focus();
     $('callbackInput').placeholder='Paste the full callback URL from the popup address bar…';
     if(pkceTimer)clearInterval(pkceTimer);
@@ -1289,7 +1302,7 @@ function renderUkeTabs(){
   $('useKeyOs').innerHTML=ukeOs.map(o=>`<button class="uke-tab ${o.id===ukeOsSel?'active':''}" onclick="ukeOsSel='${o.id}';renderUkeFiles()">${o.label}</button>`).join('');
   try{lucide.createIcons();}catch(e){}
 }
-function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function ukeFile(path,content){
   return `<div class="uke-file">
     <div class="uke-file-head"><code>${esc(path)}</code><button class="btn btn-sm" onclick="navigator.clipboard.writeText(this.closest('.uke-file').querySelector('pre').textContent.trim());showNotice('Copied','success')">Copy</button></div>
@@ -1370,9 +1383,29 @@ async function loadConversations(){
   try{
     const d=await api('/api/m365/conversations');
     const c=d.data||[];
-    $('convRows').innerHTML=c.length?c.map(x=>`<tr><td><code style="font-size:11px">${x.conversationId?.slice(0,16)}...</code></td><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.chatName||'-'}</td><td style="font-size:12px;color:var(--muted)">${x.createTimeUtc?new Date(x.createTimeUtc).toLocaleString():'-'}</td><td><button class="btn-sm btn danger" onclick="deleteConv('${x.conversationId}')">Delete</button></td></tr>`).join(''):'<tr><td colspan="4" class="empty">No conversations</td></tr>';
-  }catch(e){$('convRows').innerHTML=`<tr><td colspan="4" class="empty">${e.message}</td></tr>`;}
+    $('convRows').innerHTML=c.length?c.map(x=>{
+      const id=String(x.conversationId||'');
+      const updated=x.updateTimeUtc||x.createTimeUtc;
+      return `<tr class="conv-row" data-conversation-id="${esc(id)}">
+        <td><button class="conv-link" type="button">${esc(x.chatName||'Untitled conversation')}</button><div class="conv-meta"><code>${esc(id)}</code></div></td>
+        <td>${Number(x.messageCount||0)}</td>
+        <td>${esc(x.accountEmail||x.accountId||'-')}</td>
+        <td style="font-size:12px;color:var(--muted)">${updated?new Date(updated).toLocaleString():'-'}</td>
+        <td><div style="display:flex;gap:6px"><button class="btn-sm btn" data-conv-action="view">View</button><button class="btn-sm btn danger" data-conv-action="delete">Delete</button></div></td>
+      </tr>`;
+    }).join(''):'<tr><td colspan="5" class="empty">No conversations</td></tr>';
+    $('convRows').querySelectorAll('.conv-row').forEach(row=>{
+      row.addEventListener('click',event=>{
+        const action=event.target.closest('[data-conv-action]')?.dataset.convAction;
+        if(action==='delete'){event.stopPropagation();deleteConv(row.dataset.conversationId);return;}
+        openConversation(row.dataset.conversationId);
+      });
+    });
+    applyLocale(currentLocale);
+  }catch(e){$('convRows').innerHTML=`<tr><td colspan="5" class="empty">${esc(e.message)}</td></tr>`;}
 }
+
+function openConversation(id){window.open('/conversation?id='+encodeURIComponent(id),'_blank','noopener');}
 
 function termOpen(title){$('termTitle').textContent=title;$('termBody').innerHTML='';$('termBox').style.display='block';}
 function termLine(msg,cls){const d=document.createElement('div');if(cls)d.className=cls;d.textContent='> '+msg;$('termBody').appendChild(d);$('termBody').scrollTop=$('termBody').scrollHeight;}
@@ -1526,7 +1559,8 @@ async function saveSettings(){  try{
 // Init
 try{lucide.createIcons();}catch(e){}
 fetch('/api/admin/session').then(r=>r.json()).then(d=>{
-  if(d.authenticated){$('login').style.display='none';$('app').style.display='flex';showPage('dashboard');loadStats();loadOnboarding();}
+  if(d.authenticated&&d.must_change_password){location.replace('/login');}
+  else if(d.authenticated){$('login').style.display='none';$('app').style.display='flex';showPage('dashboard');loadStats();loadOnboarding();}
   else{$('login').style.display='grid';}
 }).catch(()=>{$('login').style.display='grid';});
 </script>

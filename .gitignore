@@ -52,3 +52,8 @@ AGENTS.md
 # Session scratch
 /.test-tmp/
 PROGRESS.md
+*.exe
+*.exe~
+*.bak*
+_wip_backup_*
+*.dll

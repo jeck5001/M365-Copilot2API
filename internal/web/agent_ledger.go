@@ -46,6 +46,7 @@ func compactToolResult(s string, limit int) string {
 	}
 	return s[:head] + fmt.Sprintf("\n... [truncated %d bytes] ...\n", len(s)-head-tail) + s[len(s)-tail:]
 }
+
 // scopedCallID returns a globally unique tool call id. The scope parameters
 // are kept for signature compatibility with callers that pass per-turn
 // context; the id itself must not depend on call content or scope text,
@@ -195,11 +196,8 @@ func completionEvidenceAllows(answer string, l agentLedger) bool {
 	if len(l.Pending) > 0 {
 		return false
 	}
-	if len(l.Completed) > 0 {
-		return true
-	}
-	if !unsupportedSuccess.MatchString(answer) {
-		return true
+	if len(l.Completed) == 0 && len(l.Pending) == 0 {
+		return !unsupportedSuccess.MatchString(answer)
 	}
 	low := strings.ToLower(answer)
 	for _, h := range []string{"cannot confirm", "not confirmed", "unable to confirm", "no tool result", "not completed", "failed"} {

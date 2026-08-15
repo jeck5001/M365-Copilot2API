@@ -25,6 +25,7 @@ services:
       #   M365_CHATHUB_DUMP_FRAMES=/data/frames.jsonl docker compose up -d
       # Frames contain answer text, so leave this unset for normal runs.
       M365_CHATHUB_DUMP_FRAMES: "${M365_CHATHUB_DUMP_FRAMES:-}"
+      M365_PUBLIC_IDENTITY_POLICY: "${M365_PUBLIC_IDENTITY_POLICY:-false}"
     volumes:
       - ./data:/data
       - ./secrets/m365_admin_password:/run/secrets/m365_admin_password:ro

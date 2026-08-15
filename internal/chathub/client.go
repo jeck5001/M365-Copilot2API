@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -24,6 +25,19 @@ import (
 // ChatHub sometimes sends through the text channel instead of HTTP 429.
 // Callers must independently probe the account before marking it unhealthy.
 var ErrRateLimitNotice = errors.New("upstream rate-limit notice")
+
+var ErrEmptyCompletion = errors.New("upstream returned empty completion; tone may be unavailable for this tenant")
+
+// DialError carries the HTTP status and optional Retry-After from a failed
+// WebSocket dial so the web layer can route it into the correct cooldown.
+type DialError struct {
+	Status     int
+	RetryAfter int
+}
+
+func (e *DialError) Error() string {
+	return fmt.Sprintf("ws dial: upstream %d", e.Status)
+}
 
 var chTrace = os.Getenv("M365_TRACE") == "1"
 
@@ -393,9 +407,17 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 	}
 
 	dialStarted := time.Now()
-	conn, _, err := c.Dialer.DialContext(ctx, wsURL, c.HTTPHeader.Clone())
+	conn, resp, err := c.Dialer.DialContext(ctx, wsURL, c.HTTPHeader.Clone())
 	log.Printf("chathub timing ws_dial_ms=%d total_ms=%d", time.Since(dialStarted).Milliseconds(), time.Since(startedAt).Milliseconds())
 	if err != nil {
+		if resp != nil && (resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403) {
+			retryAfter := 0
+			if v, _ := strconv.Atoi(resp.Header.Get("Retry-After")); v > 0 {
+				retryAfter = v
+			}
+			log.Printf("chathub ws_dial %d Retry-After=%d", resp.StatusCode, retryAfter)
+			return Result{}, &DialError{Status: resp.StatusCode, RetryAfter: retryAfter}
+		}
 		return Result{}, fmt.Errorf("ws dial: %w", err)
 	}
 	defer conn.Close()
@@ -627,6 +649,9 @@ if joined := strings.Join(deltas, ""); joined != text {
 				}
 				if rateLimited(text) {
 					return Result{}, ErrRateLimitNotice
+				}
+				if text == "" {
+					return Result{}, ErrEmptyCompletion
 				}
 				return Result{
 					Text:           text,
@@ -933,28 +958,4 @@ func chatPayload(text, sessionID, conversationID, requestID, tone string, firstT
 	b1, _ := json.Marshal(chat)
 	b2, _ := json.Marshal(metrics)
 	return string(b1) + rs + string(b2) + rs
-}
-
-func longestCommonPrefix(a, b string) int {
-	minLen := len(a)
-	if len(b) < minLen {
-		minLen = len(b)
-	}
-	i := 0
-	for i < minLen && a[i] == b[i] {
-		i++
-	}
-	return i
-}
-
-func longestCommonSuffix(a, b string) int {
-	ai := len(a) - 1
-	bi := len(b) - 1
-	n := 0
-	for ai >= 0 && bi >= 0 && a[ai] == b[bi] {
-		n++
-		ai--
-		bi--
-	}
-	return n
 }
