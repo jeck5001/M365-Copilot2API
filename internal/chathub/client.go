@@ -319,21 +319,23 @@ type Result struct {
 }
 
 type Client struct {
-	HTTPHeader http.Header
-	HTTPClient *http.Client
-	Dialer     *websocket.Dialer
-	// Trace receives attachment-only metadata; URL contents are never exposed.
-	Trace func(map[string]any)
+	HTTPHeader  http.Header
+	HTTPClient  *http.Client
+	Dialer      *websocket.Dialer
+	Pool        *ConnPool
+	Trace       func(map[string]any)
 }
 
 func NewClient() *Client {
 	h := make(http.Header)
 	h.Set("Origin", "https://m365.cloud.microsoft")
 	h.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0")
+	d := outbound.WebSocketDialer()
 	return &Client{
 		HTTPHeader: h,
 		HTTPClient: outbound.HTTPClient(),
-		Dialer:     outbound.WebSocketDialer(),
+		Dialer:     d,
+		Pool:       NewConnPool(d, h),
 	}
 }
 
@@ -397,39 +399,72 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		firstTurn = true
 	}
 	requestID := uuid.NewString()
-	if err := c.uploadAttachments(ctx, acc, req.ConversationID, req.Attachments); err != nil {
-		return Result{}, fmt.Errorf("upload attachment: %w", err)
-	}
-
 	wsURL, err := buildWSURL(acc, req.SessionID, req.ConversationID, requestID)
 	if err != nil {
 		return Result{}, err
 	}
+	attachCh := make(chan error, 1)
+	if len(req.Attachments) > 0 {
+		go func() { attachCh <- c.uploadAttachments(ctx, acc, req.ConversationID, req.Attachments) }()
+	}
 
 	dialStarted := time.Now()
-	conn, resp, err := c.Dialer.DialContext(ctx, wsURL, c.HTTPHeader.Clone())
-	log.Printf("chathub timing ws_dial_ms=%d total_ms=%d", time.Since(dialStarted).Milliseconds(), time.Since(startedAt).Milliseconds())
-	if err != nil {
-		if resp != nil && (resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403) {
-			retryAfter := 0
-			if v, _ := strconv.Atoi(resp.Header.Get("Retry-After")); v > 0 {
-				retryAfter = v
-			}
-			log.Printf("chathub ws_dial %d Retry-After=%d", resp.StatusCode, retryAfter)
-			return Result{}, &DialError{Status: resp.StatusCode, RetryAfter: retryAfter}
+	var conn *websocket.Conn
+	var reused bool
+	if c.Pool != nil {
+		var poolErr error
+		conn, reused, poolErr = c.Pool.Take(ctx, acc.OID, acc.TID, wsURL)
+		if poolErr != nil {
+			return Result{}, fmt.Errorf("ws dial: %w", poolErr)
 		}
-		return Result{}, fmt.Errorf("ws dial: %w", err)
 	}
-	defer conn.Close()
+	if conn == nil {
+		var resp *http.Response
+		conn, resp, err = c.Dialer.DialContext(ctx, wsURL, c.HTTPHeader.Clone())
+		if err != nil {
+			if resp != nil && (resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403) {
+				retryAfter := 0
+				if v, _ := strconv.Atoi(resp.Header.Get("Retry-After")); v > 0 {
+					retryAfter = v
+				}
+				log.Printf("chathub ws_dial %d Retry-After=%d", resp.StatusCode, retryAfter)
+				return Result{}, &DialError{Status: resp.StatusCode, RetryAfter: retryAfter}
+			}
+			return Result{}, fmt.Errorf("ws dial: %w", err)
+		}
+	}
+	log.Printf("chathub timing ws_dial_ms=%d total_ms=%d reused=%t", time.Since(dialStarted).Milliseconds(), time.Since(startedAt).Milliseconds(), reused)
+
+	returnConn := true
+	defer func() {
+		if returnConn && conn != nil && c.Pool != nil {
+			_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			c.Pool.Return(acc.OID, acc.TID, conn)
+		} else if conn != nil {
+			conn.Close()
+		}
+	}()
+
+	if len(req.Attachments) > 0 {
+		if attachErr := <-attachCh; attachErr != nil {
+			returnConn = false
+			return Result{}, fmt.Errorf("upload attachment: %w", attachErr)
+		}
+	}
 
 	_ = conn.SetReadDeadline(time.Now().Add(45 * time.Second))
 	_ = conn.SetWriteDeadline(time.Now().Add(15 * time.Second))
 
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"protocol":"json","version":1}`+rs)); err != nil {
-		return Result{}, fmt.Errorf("handshake send: %w", err)
-	}
-	if _, _, err := conn.ReadMessage(); err != nil {
-		return Result{}, fmt.Errorf("handshake recv: %w", err)
+	if !reused {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"protocol":"json","version":1}`+rs)); err != nil {
+			returnConn = false
+			return Result{}, fmt.Errorf("handshake send: %w", err)
+		}
+		if _, _, err := conn.ReadMessage(); err != nil {
+			returnConn = false
+			return Result{}, fmt.Errorf("handshake recv: %w", err)
+		}
 	}
 
 	payload := chatPayload(req.Text, req.SessionID, req.ConversationID, requestID, req.Tone, firstTurn, req.Attachments, req.Tools, req.ToolChoice, req.MCPServerURL)
@@ -444,6 +479,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 	log.Printf("chathub timing handshake_ms=%d", time.Since(dialStarted).Milliseconds())
 	payloadSentAt := time.Now()
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
+		returnConn = false
 		return Result{}, fmt.Errorf("chat send: %w", err)
 	}
 
@@ -466,7 +502,6 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		}
 		return nil
 	}
-snapshots := newSnapshotEmitter(streamed.String, emitDelta)
 	// ChatHub signals text either as a full snapshot or as cursor rewrites.
 	// Upstream rate limiting surfaces as a human-readable notice on the text
 	// channel instead of an HTTP 429. Detect it before any real content has
@@ -483,6 +518,29 @@ snapshots := newSnapshotEmitter(streamed.String, emitDelta)
 			strings.Contains(t, "无法响应这么多请求") ||
 			strings.Contains(t, "too many requests") ||
 			strings.Contains(t, "please retry") && strings.Contains(t, "later")
+	}
+	emitSnapshot := func(snapshot string) error {
+		if snapshot == "" {
+			return nil
+		}
+		if chTrace {
+			log.Printf("[trace:emitSnapshot] cur=%d snapshot=%d", streamed.Len(), len(snapshot))
+		}
+		if rateLimited(snapshot) {
+			return ErrRateLimitNotice
+		}
+		cur := streamed.String()
+		if cur == "" {
+			return emitDelta(snapshot)
+		}
+		if strings.HasPrefix(snapshot, cur) {
+			return emitDelta(snapshot[len(cur):])
+		}
+		if len(snapshot) <= len(cur) {
+			return nil
+		}
+		log.Printf("[emitSnapshot] skip: cur=%d snapshot=%d (non-prefix rewrite)", len(cur), len(snapshot))
+		return nil
 	}
 	var final string
 	var throttling any
@@ -507,10 +565,12 @@ snapshots := newSnapshotEmitter(streamed.String, emitDelta)
 		var read wsRead
 		select {
 		case <-ctx.Done():
+			returnConn = false
 			return Result{}, ctx.Err()
 		case read = <-readCh:
 		}
 		if read.err != nil {
+			returnConn = false
 			// Never convert a timeout or dropped WebSocket into a successful
 			// partial response. A response is complete only after SignalR type 3.
 			return Result{}, fmt.Errorf("ws read before completion: %w", read.err)
@@ -548,6 +608,7 @@ snapshots := newSnapshotEmitter(streamed.String, emitDelta)
 					if onEvent != nil {
 						for _, ev := range extractToolEvents(arg, seenStreamTools) {
 							if err := onEvent(ev); err != nil {
+								returnConn = false
 								return Result{}, err
 							}
 						}
@@ -562,6 +623,7 @@ snapshots := newSnapshotEmitter(streamed.String, emitDelta)
 						// handlers even though they are classified as text.
 						if (ev.Kind != "text" || ev.ContentType == "SearchResults") && onEvent != nil {
 							if err := onEvent(ev); err != nil {
+								returnConn = false
 								return Result{}, err
 							}
 						}
@@ -579,12 +641,13 @@ snapshots := newSnapshotEmitter(streamed.String, emitDelta)
 						throttling = thr
 					}
 					if w, ok := arg["writeAtCursor"].(string); ok && w != "" && !toolFrame {
-						if err := snapshots.AddCursor(w); err != nil {
+						if err := emitSnapshot(w); err != nil {
+							returnConn = false
 							return Result{}, err
 						}
 					}
 					if msgs, ok := arg["messages"].([]any); ok {
-						for i, mraw := range msgs {
+						for _, mraw := range msgs {
 							m, ok := mraw.(map[string]any)
 							if !ok {
 								continue
@@ -593,10 +656,10 @@ snapshots := newSnapshotEmitter(streamed.String, emitDelta)
 							text, _ := m["text"].(string)
 							mt, _ := m["messageType"].(string)
 							if author == "bot" && mt == "" && text != "" {
-								// The authoritative channel: cumulative per message, and keyed
-								// per message so a later one does not reset an earlier one's
-								// baseline. Emit only the unseen suffix.
-								if err := snapshots.Add(messageSource(m, i), text); err != nil {
+								// ChatHub often sends the first visible text as a full snapshot,
+								// followed by cursor deltas. Emit only the unseen suffix.
+								if err := emitSnapshot(text); err != nil {
+									returnConn = false
 									return Result{}, err
 								}
 							}
@@ -617,6 +680,7 @@ snapshots := newSnapshotEmitter(streamed.String, emitDelta)
 				if msg, ok := res["message"].(string); ok {
 						final = msg
 						if rateLimited(final) {
+							returnConn = false
 							return Result{}, ErrRateLimitNotice
 						}
 					}
@@ -631,6 +695,7 @@ if t := completionText(item); t != "" {
 
 			if int(t) == 3 {
 				if errObj, ok := obj["error"].(map[string]any); ok {
+					returnConn = false
 					return Result{}, fmt.Errorf("chathub completion error: %v", errObj)
 				}
 				log.Printf("chathub timing completion_frame_ms=%d streamed_text=%d events=%d", time.Since(payloadSentAt).Milliseconds(), streamed.Len(), len(events))
@@ -648,9 +713,11 @@ if joined := strings.Join(deltas, ""); joined != text {
 					log.Printf("chathub snapshot merge mismatch streamed=%d final=%d", len(joined), len(text))
 				}
 				if rateLimited(text) {
+					returnConn = false
 					return Result{}, ErrRateLimitNotice
 				}
 				if text == "" {
+					returnConn = false
 					return Result{}, ErrEmptyCompletion
 				}
 				return Result{
@@ -672,6 +739,7 @@ if joined := strings.Join(deltas, ""); joined != text {
 	// Reaching the overall deadline without a SignalR completion frame is
 	// an incomplete upstream response. Do not return accumulated deltas as if
 	// they were a successful, finished answer.
+	returnConn = false
 	return Result{}, fmt.Errorf("chathub response deadline exceeded before completion")
 }
 

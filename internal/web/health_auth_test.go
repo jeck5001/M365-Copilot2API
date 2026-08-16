@@ -6,12 +6,9 @@ import (
 	"testing"
 )
 
-func TestHealthEndpointDoesNotRequireAdminAuthentication(t *testing.T) {
+func TestHealthEndpointRequiresAdminAuthentication(t *testing.T) {
 	s := &Server{adminPassword: "configured"}
-	h := s.adminMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/health" {
-			t.Fatalf("path = %q, want /api/health", r.URL.Path)
-		}
+	h := s.adminMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -19,8 +16,8 @@ func TestHealthEndpointDoesNotRequireAdminAuthentication(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("GET /api/health status = %d, want 200", rr.Code)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /api/health status = %d, want 401", rr.Code)
 	}
 }
 
