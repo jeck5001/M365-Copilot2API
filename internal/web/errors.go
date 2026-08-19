@@ -32,14 +32,14 @@ func upstreamError(err error) string {
 // rate limits stay 429 (with Retry-After when known), auth failures become 401,
 // everything else is 502. Unknown upstream failures must never leak internals.
 func upstreamStatus(err error) int {
-	if IsPermissionDenied(err) {
-		return http.StatusForbidden
-	}
 	if IsAuthFailure(err) {
 		return http.StatusUnauthorized
 	}
 	if IsRateLimited(err) {
 		return http.StatusTooManyRequests
+	}
+	if IsPermissionDenied(err) {
+		return http.StatusForbidden
 	}
 	if IsInsufficientQuota(err) {
 		return http.StatusTooManyRequests
