@@ -85,8 +85,27 @@ func (c *accountConcurrency) Snapshot() map[string]any {
 	return map[string]any{"limit": c.limit, "inflight": inflight}
 }
 
+func (c *accountConcurrency) inflightCount(accountID string) int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.inflight[accountID]
+}
+
 func (s *Server) accountAvailable(accountID string) bool {
+	if s.tokens != nil && !s.tokens.ScheduleEnabled(accountID) {
+		return false
+	}
 	return s.accountPool.Available(accountID) && s.accountConcurrency.Available(accountID)
+}
+
+func (s *Server) accountClient(accountID string) *chathub.Client {
+	if acc, ok := s.tokens.Get(accountID); ok && acc.BoundProxy != "" {
+		return s.clientForProxy(acc.BoundProxy)
+	}
+	return s.chat
 }
 
 func (s *Server) chatWithAccount(ctx context.Context, accountID string, account chathub.Account, request chathub.Request) (chathub.Result, error) {
@@ -95,7 +114,12 @@ func (s *Server) chatWithAccount(ctx context.Context, accountID string, account 
 		return chathub.Result{}, err
 	}
 	defer release()
-	return s.chat.Chat(ctx, account, request)
+	if s.accountPool != nil {
+		s.accountPool.MarkCall(accountID)
+	}
+	result, err := s.accountClient(accountID).Chat(ctx, account, request)
+	s.markAccountResult(accountID, err)
+	return result, err
 }
 
 func (s *Server) chatWithAccountEvents(ctx context.Context, accountID string, account chathub.Account, request chathub.Request, onEvent func(chathub.StreamEvent) error) (chathub.Result, error) {
@@ -104,7 +128,12 @@ func (s *Server) chatWithAccountEvents(ctx context.Context, accountID string, ac
 		return chathub.Result{}, err
 	}
 	defer release()
-	return s.chat.ChatWithEvents(ctx, account, request, onEvent)
+	if s.accountPool != nil {
+		s.accountPool.MarkCall(accountID)
+	}
+	result, err := s.accountClient(accountID).ChatWithEvents(ctx, account, request, onEvent)
+	s.markAccountResult(accountID, err)
+	return result, err
 }
 
 func (s *Server) chatWithAccountReasoning(ctx context.Context, accountID string, account chathub.Account, request chathub.Request, onDelta, onReasoning func(string) error) (chathub.Result, error) {
@@ -113,5 +142,10 @@ func (s *Server) chatWithAccountReasoning(ctx context.Context, accountID string,
 		return chathub.Result{}, err
 	}
 	defer release()
-	return s.chat.ChatWithReasoning(ctx, account, request, onDelta, onReasoning)
+	if s.accountPool != nil {
+		s.accountPool.MarkCall(accountID)
+	}
+	result, err := s.accountClient(accountID).ChatWithReasoning(ctx, account, request, onDelta, onReasoning)
+	s.markAccountResult(accountID, err)
+	return result, err
 }
