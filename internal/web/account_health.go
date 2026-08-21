@@ -35,10 +35,10 @@ func IsRateLimited(err error) bool {
 	}
 	var httpErr *UpstreamHTTPError
 	if errors.As(err, &httpErr) {
-		if httpErr.Status == 429 || httpErr.Status == 503 {
+		if httpErr.Status == 429 {
 			return true
 		}
-		if httpErr.Status != 401 && httpErr.Status != 403 {
+		if httpErr.Status != 401 && httpErr.Status != 403 && httpErr.Status != 503 {
 			if strings.Contains(strings.ToLower(httpErr.Body), "limited") {
 				return true
 			}
@@ -108,11 +108,11 @@ func IsAuthFailure(err error) bool {
 	}
 	var httpErr *UpstreamHTTPError
 	if errors.As(err, &httpErr) {
-		return httpErr.Status == 401 || httpErr.Status == 403
+		return httpErr.Status == 401
 	}
 	var dialErr *chathub.DialError
 	if errors.As(err, &dialErr) {
-		return dialErr.Status == 401 || dialErr.Status == 403
+		return dialErr.Status == 401
 	}
 	return false
 }
