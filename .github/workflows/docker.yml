@@ -37,10 +37,7 @@ jobs:
         id: tags
         run: |
           BRANCH_TAG=$(echo "${GITHUB_REF_NAME}" | tr '/' '-' | tr '[:upper:]' '[:lower:]')
-          TAGS="${REGISTRY}/${IMAGE_NAME_LOWER}:${BRANCH_TAG},${REGISTRY}/${IMAGE_NAME_LOWER}:${GITHUB_SHA}"
-          if [ "${GITHUB_REF_NAME}" = "main" ]; then
-            TAGS="${TAGS},${REGISTRY}/${IMAGE_NAME_LOWER}:latest"
-          fi
+          TAGS="${REGISTRY}/${IMAGE_NAME_LOWER}:${BRANCH_TAG},${REGISTRY}/${IMAGE_NAME_LOWER}:${GITHUB_SHA},${REGISTRY}/${IMAGE_NAME_LOWER}:latest"
           echo "tags=${TAGS}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Docker Buildx
