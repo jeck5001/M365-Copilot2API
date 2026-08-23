@@ -62,32 +62,32 @@ func writeUpstreamError(w http.ResponseWriter, err error) {
 		if w.Header().Get("Retry-After") == "" {
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(rateLimitCooldown.Seconds())))
 		}
-		writeOpenAIError(w, status, "rate_limit_error", "rate_limit_exceeded", "rate limited by upstream; retry after the indicated cool-down period")
+		writeOpenAIError(w, status, "rate_limit_error", "rate limited by upstream; retry after the indicated cool-down period")
 		return
 	}
 	if IsInsufficientQuota(err) {
-		writeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_error", "insufficient_quota", "account quota exhausted; check M365 subscription and Copilot license")
+		writeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_error", "account quota exhausted; check M365 subscription and Copilot license")
 		return
 	}
 	if IsPermissionDenied(err) {
-		writeOpenAIError(w, http.StatusForbidden, "authentication_error", "insufficient_permissions", "account not authorized for Copilot; check M365 subscription and Copilot license assignment")
+		writeOpenAIError(w, http.StatusForbidden, "authentication_error", "account not authorized for Copilot; check M365 subscription and Copilot license assignment")
 		return
 	}
 	if IsServerUnavailable(err) {
-		writeOpenAIError(w, http.StatusServiceUnavailable, "server_error", "service_unavailable", "upstream service temporarily unavailable; retry later")
+		writeOpenAIError(w, http.StatusServiceUnavailable, "server_error", "upstream service temporarily unavailable; retry later")
 		return
 	}
 	if IsTimeout(err) {
-		writeOpenAIError(w, http.StatusGatewayTimeout, "server_error", "timeout", "upstream request timed out")
+		writeOpenAIError(w, http.StatusGatewayTimeout, "server_error", "upstream request timed out")
 		return
 	}
 	if IsEmptyCompletion(err) {
-		writeOpenAIError(w, http.StatusBadGateway, "server_error", "empty_completion", "empty completion; model may be unavailable for this tenant")
+		writeOpenAIError(w, http.StatusBadGateway, "server_error", "empty completion; model may be unavailable for this tenant")
 		return
 	}
 	if IsContentBlocked(err) {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "content_policy_violation", "content policy blocked this request")
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "content policy blocked this request")
 		return
 	}
-	writeOpenAIError(w, status, "server_error", "bad_gateway", upstreamError(err))
+	writeOpenAIError(w, status, "server_error", upstreamError(err))
 }

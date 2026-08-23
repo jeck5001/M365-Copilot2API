@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	Version     = "0.4.0"
+	Version     = "0.5.0"
 	Commit      = "unknown"
 	BuildTime   = "unknown"
 	startedAt   = time.Now()
@@ -23,7 +23,7 @@ func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) update(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeOpenAIError(w, 405, "invalid_request_error", "method_not_allowed", "method not allowed")
+		writeOpenAIError(w, 405, "invalid_request_error", "method not allowed")
 		return
 	}
 	// Read-only endpoint: release automation remains the only publisher/upgrader.
@@ -36,5 +36,5 @@ func ReleaseTag() string {
 	if v == "" || v == "dev" {
 		return ""
 	}
-	return fmt.Sprintf("stable-v%s", v)
+	return fmt.Sprintf("v%s", v)
 }

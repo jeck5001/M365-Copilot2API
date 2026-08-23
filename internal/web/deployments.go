@@ -86,28 +86,28 @@ func (s *Server) deployments(w http.ResponseWriter, r *http.Request) {
 			Token     string `json:"token"`
 		}
 		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&in) != nil {
-			writeOpenAIError(w, 400, "invalid_request_error", "invalid_json", "bad json")
+			writeOpenAIError(w, 400, "invalid_request_error", "bad json")
 			return
 		}
 		if in.Provider != "cloudflare" {
-			writeOpenAIError(w, 400, "invalid_request_error", "invalid_parameter", "only cloudflare is implemented")
+			writeOpenAIError(w, 400, "invalid_request_error", "only cloudflare is implemented")
 			return
 		}
 		d, e := deployCloudflare(r.Context(), in.AccountID, in.Name, in.Token)
 		if e != nil {
-			writeOpenAIError(w, 400, "deployment_error", "deployment_failed", e.Error())
+			writeOpenAIError(w, 400, "deployment_error", e.Error())
 			return
 		}
 		st.mu.Lock()
 		st.Items = append(st.Items, d)
 		st.mu.Unlock()
 		if e = st.save(); e != nil {
-			writeOpenAIError(w, 500, "storage_error", "storage_error", e.Error())
+			writeOpenAIError(w, 500, "storage_error", e.Error())
 			return
 		}
 		jsonOut(w, map[string]any{"ok": true, "deployment": d})
 	default:
-		writeOpenAIError(w, 405, "invalid_request_error", "method_not_allowed", "method not allowed")
+		writeOpenAIError(w, 405, "invalid_request_error", "method not allowed")
 	}
 }
 func (s *Server) deploymentAction(w http.ResponseWriter, r *http.Request) {
@@ -123,7 +123,7 @@ func (s *Server) deploymentAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if d == nil {
 		st.mu.Unlock()
-		writeOpenAIError(w, 404, "not_found", "resource_not_found", "deployment not found")
+		writeOpenAIError(w, 404, "not_found", "deployment not found")
 		return
 	}
 	var in struct {
@@ -138,14 +138,14 @@ func (s *Server) deploymentAction(w http.ResponseWriter, r *http.Request) {
 		}
 		st.mu.Unlock()
 		if e := st.save(); e != nil {
-			writeOpenAIError(w, 500, "storage_error", "storage_error", e.Error())
+			writeOpenAIError(w, 500, "storage_error", e.Error())
 			return
 		}
 		jsonOut(w, map[string]any{"ok": true, "deployment": d})
 		return
 	}
 	st.mu.Unlock()
-	writeOpenAIError(w, 405, "invalid_request_error", "method_not_allowed", "method not allowed")
+	writeOpenAIError(w, 405, "invalid_request_error", "method not allowed")
 }
 func deployCloudflare(ctx context.Context, account, name, token string) (deployment, error) {
 	if account == "" || name == "" || token == "" {
@@ -203,16 +203,18 @@ func (s *Server) deploymentCheck(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	st := openDeployments()
 	st.mu.Lock()
-	var d *deployment
+	var d deployment
+	found := false
 	for i := range st.Items {
 		if st.Items[i].ID == id {
-			d = &st.Items[i]
+			d = st.Items[i]
+			found = true
 			break
 		}
 	}
-	if d == nil {
+	if !found {
 		st.mu.Unlock()
-		writeOpenAIError(w, 404, "not_found", "resource_not_found", "deployment not found")
+		writeOpenAIError(w, 404, "not_found", "deployment not found")
 		return
 	}
 	target := d.ActiveURL
@@ -225,23 +227,27 @@ func (s *Server) deploymentCheck(w http.ResponseWriter, r *http.Request) {
 	resp, e := deploymentHTTPClient.Do(req)
 	lat := time.Since(start).Milliseconds()
 	st.mu.Lock()
-	if e != nil {
-		d.Status = "unhealthy"
-		d.LastError = e.Error()
-	} else if resp.StatusCode != http.StatusOK {
-		d.Status = "unhealthy"
-		d.LastError = fmt.Sprintf("health returned %s", resp.Status)
-		resp.Body.Close()
-	} else {
-		d.Status = "healthy"
-		d.LastError = ""
-		d.LatencyMs = lat
-		d.LastCheckedAt = time.Now()
-		resp.Body.Close()
-		// Health alone does not prove HTTP proxy forwarding. Keep deployment records
-		// separate until an authenticated relay endpoint is implemented and verified.
+	var out deployment
+	for i := range st.Items {
+		if st.Items[i].ID == id {
+			if e != nil {
+				st.Items[i].Status = "unhealthy"
+				st.Items[i].LastError = e.Error()
+			} else if resp.StatusCode != http.StatusOK {
+				st.Items[i].Status = "unhealthy"
+				st.Items[i].LastError = fmt.Sprintf("health returned %s", resp.Status)
+				resp.Body.Close()
+			} else {
+				st.Items[i].Status = "healthy"
+				st.Items[i].LastError = ""
+				st.Items[i].LatencyMs = lat
+				st.Items[i].LastCheckedAt = time.Now()
+				resp.Body.Close()
+			}
+			out = st.Items[i]
+			break
+		}
 	}
-	out := *d
 	st.mu.Unlock()
 	_ = st.save()
 	jsonOut(w, map[string]any{"ok": e == nil, "deployment": out})

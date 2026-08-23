@@ -10,7 +10,7 @@ import (
 
 func (s *Server) conversations(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	jsonOut(w, map[string]any{"conversations": s.sessions.list()})
@@ -18,27 +18,24 @@ func (s *Server) conversations(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteConversation(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	var body struct {
 		ID string `json:"id"`
 	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil || body.ID == "" {
-		http.Error(w, "bad json", http.StatusBadRequest)
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "bad json")
 		return
 	}
 	s.conversationManager.Delete(body.ID)
-	if !s.sessions.delete(body.ID) {
-		http.Error(w, "conversation not found", http.StatusNotFound)
-		return
-	}
+	s.sessions.delete(body.ID)
 	jsonOut(w, map[string]string{"status": "deleted"})
 }
 
 func (s *Server) conversationCleanup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	var body struct {
@@ -91,13 +88,13 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			"status":          "active",
 		})
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 	}
 }
 
 func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	stats := cacheStats.GetStats()
@@ -110,7 +107,7 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCacheStatsReset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	cacheStats.Reset()
@@ -119,11 +116,11 @@ func (s *Server) handleCacheStatsReset(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleM365Conversations(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	if m365CloudClient == nil && len(s.sessionResolver.ListSessions()) == 0 {
-		writeOpenAIError(w, http.StatusServiceUnavailable, "m365_not_configured", "not_configured", "M365 cloud client not configured. Please add an M365 account first via PKCE authorization.")
+		writeOpenAIError(w, http.StatusServiceUnavailable, "m365_not_configured", "M365 cloud client not configured. Please add an M365 account first via PKCE authorization.")
 		return
 	}
 	rows := make(map[string]map[string]any)
@@ -140,7 +137,7 @@ func (s *Server) handleM365Conversations(w http.ResponseWriter, r *http.Request)
 	}
 	if cloudErr != nil && len(s.sessionResolver.ListSessions()) == 0 {
 		err := cloudErr
-		writeOpenAIError(w, http.StatusBadGateway, "m365_error", "m365_api_error", err.Error())
+		writeOpenAIError(w, http.StatusBadGateway, "m365_error", err.Error())
 		return
 	}
 	for _, session := range s.sessionResolver.ListSessions() {
@@ -181,17 +178,17 @@ func (s *Server) handleM365Conversations(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleM365ConversationDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	conversationID := strings.TrimSpace(r.URL.Query().Get("id"))
 	if conversationID == "" {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid_parameter", "conversation id is required")
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "conversation id is required")
 		return
 	}
 	session, found := s.sessionResolver.GetConversation(conversationID)
 	if !found {
-		writeOpenAIError(w, http.StatusNotFound, "conversation_not_found", "resource_not_found", "conversation history is not available")
+		writeOpenAIError(w, http.StatusNotFound, "conversation_not_found", "conversation history is not available")
 		return
 	}
 	accountEmail := ""
@@ -247,22 +244,22 @@ func conversationTimestamp(row map[string]any) int64 {
 
 func (s *Server) handleM365Delete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	if m365CloudClient == nil {
-		writeOpenAIError(w, http.StatusServiceUnavailable, "m365_not_configured", "not_configured", "M365 cloud client not configured. Please add an M365 account first via PKCE authorization.")
+		writeOpenAIError(w, http.StatusServiceUnavailable, "m365_not_configured", "M365 cloud client not configured. Please add an M365 account first via PKCE authorization.")
 		return
 	}
 	var body struct {
 		ConversationID string `json:"conversation_id"`
 	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil || body.ConversationID == "" {
-		http.Error(w, "bad json", http.StatusBadRequest)
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "bad json")
 		return
 	}
 	if err := m365CloudClient.DeleteConversation(body.ConversationID); err != nil {
-		writeOpenAIError(w, http.StatusBadGateway, "m365_error", "m365_api_error", err.Error())
+		writeOpenAIError(w, http.StatusBadGateway, "m365_error", err.Error())
 		return
 	}
 	s.dropConversation(body.ConversationID)
@@ -271,11 +268,11 @@ func (s *Server) handleM365Delete(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleM365Cleanup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	if m365CloudClient == nil {
-		writeOpenAIError(w, http.StatusServiceUnavailable, "m365_not_configured", "not_configured", "M365 cloud client not configured. Please add an M365 account first via PKCE authorization.")
+		writeOpenAIError(w, http.StatusServiceUnavailable, "m365_not_configured", "M365 cloud client not configured. Please add an M365 account first via PKCE authorization.")
 		return
 	}
 	var body struct {
@@ -295,7 +292,7 @@ func (s *Server) handleM365Cleanup(w http.ResponseWriter, r *http.Request) {
 
 	deleted, err := m365CloudClient.CleanupOldConversations(maxAge, keepN)
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadGateway, "m365_error", "m365_api_error", err.Error())
+		writeOpenAIError(w, http.StatusBadGateway, "m365_error", err.Error())
 		return
 	}
 	jsonOut(w, map[string]any{"status": "cleaned", "deleted": deleted})
@@ -303,18 +300,18 @@ func (s *Server) handleM365Cleanup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	sessionID := strings.TrimPrefix(r.URL.Path, "/v1/sessions/")
 	if sessionID == "" {
-		http.Error(w, "session_id required", http.StatusBadRequest)
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "session_id required")
 		return
 	}
 	if s.sessionResolver.DeleteSession(sessionID) {
 		jsonOut(w, map[string]any{"status": "deleted", "session_id": sessionID})
 	} else {
-		http.Error(w, "session not found", http.StatusNotFound)
+		writeOpenAIError(w, http.StatusNotFound, "not_found", "session not found")
 	}
 }
 
@@ -325,12 +322,12 @@ type conversationWhitelistRequest struct {
 
 func (s *Server) conversationWhitelist(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	var body conversationWhitelistRequest
 	if json.NewDecoder(r.Body).Decode(&body) != nil || body.ConversationID == "" {
-		http.Error(w, "bad json", http.StatusBadRequest)
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "bad json")
 		return
 	}
 	if body.Add {

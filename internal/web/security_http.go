@@ -39,7 +39,7 @@ func (s *Server) rootPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "method not allowed")
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	name := "index.html"
@@ -50,13 +50,13 @@ func (s *Server) rootPage(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := webContent.Open(name)
 	if err != nil {
-		http.Error(w, "web interface unavailable", http.StatusInternalServerError)
+		writeOpenAIError(w, http.StatusInternalServerError, "server_error", "web interface unavailable")
 		return
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		http.Error(w, "web interface unavailable", http.StatusInternalServerError)
+		writeOpenAIError(w, http.StatusInternalServerError, "server_error", "web interface unavailable")
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

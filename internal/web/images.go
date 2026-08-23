@@ -49,19 +49,20 @@ type imageGenerationRequest struct {
 func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 	startedAt := time.Now()
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	var b imageGenerationRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxImageEditRequestBytes)
 	if json.NewDecoder(r.Body).Decode(&b) != nil || strings.TrimSpace(b.Prompt) == "" {
-		http.Error(w, `{"error":{"message":"prompt is required","type":"invalid_request_error"}}`, 400)
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "prompt is required")
 		return
 	}
 	if b.N <= 0 {
 		b.N = 1
 	}
 	if b.N > 10 {
-		writeOpenAIError(w, 400, "invalid_request_error", "invalid_parameter", "n must be between 1 and 10")
+		writeOpenAIError(w, 400, "invalid_request_error", "n must be between 1 and 10")
 		return
 	}
 	format := strings.ToLower(strings.TrimSpace(b.ResponseFormat))
@@ -69,7 +70,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		format = "url"
 	}
 	if format != "url" && format != "b64_json" {
-		http.Error(w, `{"error":{"message":"response_format must be url or b64_json","type":"invalid_request_error"}}`, 400)
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "response_format must be url or b64_json")
 		return
 	}
 	acc, err := s.resolveAccount(firstNonEmpty(b.AccountID, b.User))
@@ -81,7 +82,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		acc.OID, acc.TID = extractOIDTID(acc.AccessToken)
 	}
 	if acc.OID == "" || acc.TID == "" {
-		writeOpenAIError(w, 400, "invalid_request_error", "missing_account_info", "account missing oid/tid — re-login with PKCE")
+		writeOpenAIError(w, 400, "invalid_request_error", "account missing oid/tid — re-login with PKCE")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.settings.get().ImageTimeoutSeconds)*time.Second)
@@ -94,7 +95,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 	prompt := fmt.Sprintf("Generate an image with GPT Image 2. Size: %s. Description: %s. Return the image URL directly.", size, b.Prompt)
 	if b.Operation == "edit" {
 		if len(b.Attachments) == 0 {
-			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid_parameter", "image is required")
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "image is required")
 			return
 		}
 		endpoint = "/v1/images/edits"
@@ -120,7 +121,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		refusalText := strings.Join([]string{res.Text, res.RawResult}, "\n")
 		if isImageQuotaRefusal(refusalText) {
 			w.Header().Set("Retry-After", "86400")
-			writeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_error", "rate_limit_exceeded", "M365 image generation quota is exhausted; try again later or use another account")
+			writeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_error", "M365 image generation quota is exhausted; try again later or use another account")
 			return
 		}
 		textPreview := res.Text
@@ -137,7 +138,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		debug := map[string]any{"text": textPreview, "raw_len": len(res.RawResult), "events": len(res.Events), "images": res.Images, "raw_preview": rawPreview}
 		b, _ := json.Marshal(debug)
 		log.Printf("[image-gen-debug] %s", string(b))
-		http.Error(w, `{"error":{"message":"upstream returned no image resource","type":"upstream_error"}}`, 502)
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "upstream returned no image resource")
 		return
 	}
 	images := res.Images
@@ -152,7 +153,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 			if format == "b64_json" {
 				parts := strings.SplitN(sourceURL, ",", 2)
 				if len(parts) != 2 {
-					http.Error(w, `{"error":{"message":"invalid upstream image data","type":"upstream_error"}}`, 502)
+					writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "invalid upstream image data")
 					return
 				}
 				data = append(data, map[string]string{"b64_json": parts[1]})
@@ -163,7 +164,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		}
 		if !isDesignerImageURL(sourceURL) {
 			if format == "b64_json" {
-				http.Error(w, `{"error":{"message":"upstream returned URL, not b64_json","type":"unsupported_response_format"}}`, 502)
+				writeOpenAIError(w, http.StatusBadGateway, "unsupported_response_format", "upstream returned URL, not b64_json")
 				return
 			}
 			data = append(data, map[string]string{"url": sourceURL})
@@ -172,14 +173,14 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		if designerToken == "" {
 			designerToken, err = s.designerAccessToken(acc)
 			if err != nil {
-				http.Error(w, upstreamError(err), 502)
+				writeOpenAIError(w, http.StatusBadGateway, "upstream_error", upstreamError(err))
 				return
 			}
 		}
 		imageData, contentType, err := downloadDesignerImage(ctx, sourceURL, designerToken)
 		if err != nil {
 			log.Printf("[image-gen-download] err=%v", err)
-			http.Error(w, upstreamError(err), 502)
+			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", upstreamError(err))
 			return
 		}
 		if format == "b64_json" {
@@ -205,12 +206,12 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "method not allowed")
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxImageEditRequestBytes)
 	if err := r.ParseMultipartForm(1 << 20); err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid_parameter", "invalid multipart image edit request")
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid multipart image edit request")
 		return
 	}
 	if r.MultipartForm != nil {
@@ -218,7 +219,7 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	prompt := strings.TrimSpace(r.FormValue("prompt"))
 	if prompt == "" {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid_parameter", "prompt is required")
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "prompt is required")
 		return
 	}
 	file, header, err := r.FormFile("image")
@@ -226,17 +227,17 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		file, header, err = r.FormFile("image[]")
 	}
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid_parameter", "image is required")
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "image is required")
 		return
 	}
 	defer file.Close()
 	imageData, err := io.ReadAll(io.LimitReader(file, maxGeneratedImageBytes+1))
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid_parameter", "could not read image")
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "could not read image")
 		return
 	}
 	if len(imageData) > maxGeneratedImageBytes {
-		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "invalid_parameter", "image exceeds 20 MiB")
+		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "image exceeds 20 MiB")
 		return
 	}
 	contentType := http.DetectContentType(imageData)
@@ -249,7 +250,7 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	case "image/webp":
 		ext = "webp"
 	default:
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid_parameter", "image must be PNG, JPEG, or WebP")
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "image must be PNG, JPEG, or WebP")
 		return
 	}
 	name := strings.TrimSpace(header.Filename)
@@ -260,7 +261,7 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	if rawN := strings.TrimSpace(r.FormValue("n")); rawN != "" {
 		n, err = strconv.Atoi(rawN)
 		if err != nil {
-			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid_parameter", "n must be an integer")
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "n must be an integer")
 			return
 		}
 	}
@@ -282,7 +283,7 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
-		writeOpenAIError(w, http.StatusInternalServerError, "internal_error", "internal_error", "could not encode image edit request")
+		writeOpenAIError(w, http.StatusInternalServerError, "internal_error", "could not encode image edit request")
 		return
 	}
 	next := r.Clone(r.Context())
@@ -399,7 +400,7 @@ func generatedImageURL(r *http.Request, id string) string {
 
 func (s *Server) generatedImageFile(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/v1/images/files/")
@@ -528,9 +529,17 @@ func downloadImageAsDataURI(url string) (string, error) {
 func downloadImageAsDataURIWithToken(url, token string) (string, error) {
 	b64, ct, err := downloadImageAsBase64WithToken(url, token)
 	if err != nil {
-		log.Printf("[image-download] failed url=%s token_len=%d err=%v", url[:80], len(token), err)
+		urlPreview := url
+		if len(urlPreview) > 80 {
+			urlPreview = urlPreview[:80]
+		}
+		log.Printf("[image-download] failed url=%s token_len=%d err=%v", urlPreview, len(token), err)
 		return url, nil
 	}
-	log.Printf("[image-download] ok url=%s ct=%s size=%d", url[:80], ct, len(b64))
+	urlPreview := url
+	if len(urlPreview) > 80 {
+		urlPreview = urlPreview[:80]
+	}
+	log.Printf("[image-download] ok url=%s ct=%s size=%d", urlPreview, ct, len(b64))
 	return "data:" + ct + ";base64," + b64, nil
 }
