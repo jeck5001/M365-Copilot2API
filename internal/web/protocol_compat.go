@@ -70,8 +70,21 @@ func codexInputTools(input any) []map[string]any {
 	return out
 }
 
+func normalizeResponsesModel(model string) string {
+	m := strings.TrimSpace(model)
+	if m == "" || strings.EqualFold(m, "auto") {
+		return "gpt-5.6-sol"
+	}
+	low := strings.ToLower(m)
+	if strings.HasPrefix(low, "gpt-4") || strings.HasPrefix(low, "o1") || strings.HasPrefix(low, "o3") {
+		return "gpt-5.6-sol"
+	}
+	return m
+}
+
 func (r responsesRequest) openAI() (oaiReq, error) {
-	o := oaiReq{Model: r.Model, AccountID: r.AccountID, Stream: r.Stream, ToolChoice: r.ToolChoice, User: r.User}
+	model := normalizeResponsesModel(r.Model)
+	o := oaiReq{Model: model, AccountID: r.AccountID, Stream: r.Stream, ToolChoice: r.ToolChoice, User: r.User}
 	if r.Temperature != nil {
 		o.Temperature = r.Temperature
 	}

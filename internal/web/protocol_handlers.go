@@ -38,7 +38,7 @@ func (p *pipeResponseWriter) Flush() {}
 
 // streamResponsesAdapter converts the internal OpenAI SSE incrementally instead
 // of buffering the entire completion in httptest.ResponseRecorder.
-func (s *Server) streamResponsesAdapter(w http.ResponseWriter, r *http.Request, o oaiReq, model string) {
+func (s *Server) streamResponsesAdapter(w http.ResponseWriter, r *http.Request, o oaiReq, model string, startedAt time.Time) {
 	o.Stream = true
 	b, _ := json.Marshal(o)
 	r2 := r.Clone(r.Context())
@@ -46,23 +46,21 @@ func (s *Server) streamResponsesAdapter(w http.ResponseWriter, r *http.Request, 
 	r2.Body = io.NopCloser(bytes.NewReader(b))
 	r2.ContentLength = int64(len(b))
 	pr, pw := io.Pipe()
-	// Returning early (client disconnect) stops draining the pipe. Closing the
-	// read half unblocks the inner writer instead of parking that goroutine,
-	// and its ChatHub connection, on a write nobody will ever read.
 	defer pr.Close()
 	irw := &pipeResponseWriter{h: make(http.Header), w: pw}
 	innerDone := make(chan struct{})
 	go func() {
 		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[responses] inner goroutine panic: %v", r)
+			if rec := recover(); rec != nil {
+				log.Printf("[responses] inner goroutine panic: %v", rec)
 			}
 			_ = pw.Close()
 			close(innerDone)
 		}()
 		s.openaiChat(irw, r2)
 	}()
-	translateChatStreamToResponses(w, r, model, o, pr, innerDone, func() int { return irw.status })
+	tenant := extractAPIKey(r)
+	translateChatStreamToResponsesInternal(w, r, model, o, pr, innerDone, func() int { return irw.status }, s, tenant, startedAt)
 }
 
 // translateChatStreamToResponses rewrites the internal OpenAI chat SSE in src as
@@ -70,6 +68,10 @@ func (s *Server) streamResponsesAdapter(w http.ResponseWriter, r *http.Request, 
 // innerStatus reports the status it wrote, so transport failures can be told
 // apart from a turn that streamed cleanly.
 func translateChatStreamToResponses(w http.ResponseWriter, r *http.Request, model string, o oaiReq, src io.Reader, innerDone <-chan struct{}, innerStatus func() int) {
+	translateChatStreamToResponsesInternal(w, r, model, o, src, innerDone, innerStatus, nil, "", time.Time{})
+}
+
+func translateChatStreamToResponsesInternal(w http.ResponseWriter, r *http.Request, model string, o oaiReq, src io.Reader, innerDone <-chan struct{}, innerStatus func() int, server *Server, tenant string, startedAt time.Time) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -213,8 +215,9 @@ func translateChatStreamToResponses(w http.ResponseWriter, r *http.Request, mode
 		return
 	}
 	output := []any{}
+	var keys []int
 	if len(calls) > 0 {
-		keys := make([]int, 0, len(calls))
+		keys = make([]int, 0, len(calls))
 		for k := range calls {
 			keys = append(keys, k)
 		}
@@ -257,6 +260,72 @@ func translateChatStreamToResponses(w http.ResponseWriter, r *http.Request, mode
 	estimate := estimateResponsesUsage(model, o.Messages, o.Tools, o.ToolChoice, usageOutput)
 	resp := map[string]any{"id": id, "object": "response", "created_at": created, "status": "completed", "model": model, "output": output, "usage": estimate.Values, "m365": localUsageMetadata(estimate.Source)}
 	emit("response.completed", map[string]any{"type": "response.completed", "response": resp})
+
+	if server != nil && len(output) > 0 {
+		stored := append([]oaiMsg(nil), o.Messages...)
+		if len(calls) > 0 {
+			converted := make([]map[string]any, 0, len(calls))
+			for _, i := range keys {
+				st := calls[i]
+				if st != nil {
+					typ := "function"
+					if st.Type == "custom" {
+						typ = "custom"
+					}
+					converted = append(converted, map[string]any{
+						"id":       st.ID,
+						"type":     typ,
+						"function": map[string]any{"name": st.Name, "arguments": st.Args},
+					})
+				}
+			}
+			stored = append(stored, oaiMsg{Role: "assistant", ToolCalls: converted})
+		} else if text.Len() > 0 {
+			stored = append(stored, oaiMsg{Role: "assistant", Content: text.String()})
+		}
+		server.saveResponseHistory(tenant, id, stored)
+		if server.usage != nil {
+			server.usage.record(UsageRecord{
+				Time:         time.Now(),
+				APIKeyPrefix: tenant,
+				Model:        model,
+				Endpoint:     "/v1/responses",
+				InputTokens:  int64(estimate.Values["input_tokens"].(int)),
+				OutputTokens: int64(estimate.Values["output_tokens"].(int)),
+				DurationMs:   time.Since(startedAt).Milliseconds(),
+				Status:       200,
+			})
+		}
+	}
+}
+
+func (s *Server) saveResponseHistory(tenant string, publicID string, messages []oaiMsg) {
+	if s == nil || publicID == "" {
+		return
+	}
+	s.responseMu.Lock()
+	defer s.responseMu.Unlock()
+	bucket := s.responseMessages[tenant]
+	if bucket == nil {
+		bucket = map[string]respHistory{}
+		s.responseMessages[tenant] = bucket
+	}
+	for k, h := range bucket {
+		if time.Since(h.At) > time.Hour {
+			delete(bucket, k)
+		}
+	}
+	if len(bucket) >= maxResponsesPerTenant {
+		var oldestKey string
+		var oldestAt time.Time
+		for k, h := range bucket {
+			if oldestKey == "" || h.At.Before(oldestAt) {
+				oldestKey, oldestAt = k, h.At
+			}
+		}
+		delete(bucket, oldestKey)
+	}
+	bucket[publicID] = respHistory{At: time.Now(), Messages: messages}
 }
 
 func (s *Server) runOpenAIAdapter(r *http.Request, o oaiReq) (map[string]any, []byte, int, error) {
@@ -302,7 +371,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		o.Messages = append(messages, o.Messages...)
 	}
 	if body.Stream {
-		s.streamResponsesAdapter(w, r, o, firstNonEmpty(body.Model, "m365-copilot"))
+		s.streamResponsesAdapter(w, r, o, firstNonEmpty(o.Model, "m365-copilot"), startedAt)
 		return
 	}
 	out, raw, status, err := s.runOpenAIAdapter(r, o)
@@ -326,13 +395,13 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 			outputForUsage += fmt.Sprint(calls)
 		}
 	}
-	estimate := estimateResponsesUsage(firstNonEmpty(body.Model, "m365-copilot"), o.Messages, o.Tools, o.ToolChoice, outputForUsage)
+	estimate := estimateResponsesUsage(firstNonEmpty(o.Model, "m365-copilot"), o.Messages, o.Tools, o.ToolChoice, outputForUsage)
 	out["usage"] = estimate.Values
 	out["m365_usage_source"] = estimate.Source
 	s.usage.record(UsageRecord{
 		Time:         time.Now(),
 		APIKeyPrefix: extractAPIKey(r),
-		Model:        firstNonEmpty(body.Model, "m365-copilot"),
+		Model:        firstNonEmpty(o.Model, "m365-copilot"),
 		Endpoint:     "/v1/responses",
 		InputTokens:  int64(estimate.Values["input_tokens"].(int)),
 		OutputTokens: int64(estimate.Values["output_tokens"].(int)),
@@ -361,31 +430,9 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		s.responseMu.Lock()
-		bucket := s.responseMessages[tenant]
-		if bucket == nil {
-			bucket = map[string]respHistory{}
-			s.responseMessages[tenant] = bucket
-		}
-		for k, h := range bucket {
-			if time.Since(h.At) > time.Hour {
-				delete(bucket, k)
-			}
-		}
-		if len(bucket) >= maxResponsesPerTenant {
-			var oldestKey string
-			var oldestAt time.Time
-			for k, h := range bucket {
-				if oldestKey == "" || h.At.Before(oldestAt) {
-					oldestKey, oldestAt = k, h.At
-				}
-			}
-			delete(bucket, oldestKey)
-		}
-		bucket[publicID] = respHistory{At: time.Now(), Messages: stored}
-		s.responseMu.Unlock()
+		s.saveResponseHistory(tenant, publicID, stored)
 	}
-	writeResponsesResult(w, firstNonEmpty(body.Model, "m365-copilot"), body.Stream, out)
+	writeResponsesResult(w, firstNonEmpty(o.Model, "m365-copilot"), body.Stream, out)
 }
 
 func responsesOutputHasContent(src map[string]any) bool {
