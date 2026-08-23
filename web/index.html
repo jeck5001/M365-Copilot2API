@@ -1462,14 +1462,16 @@ function ugPage(delta){
 }
 
 // ===== Use API modal =====
-let useKeyId='',useKeyPrefix='',modelTestKey='';const ukeClients=[
-  {id:'curl',label:'curl'},
-  {id:'codex',label:'Codex CLI'},
+const ukeClients=[
   {id:'claude',label:'Claude Code'},
   {id:'opencode',label:'OpenCode'},
+  {id:'codex',label:'Codex CLI'},
+  {id:'cursor',label:'Cursor / Cline'},
+  {id:'mcp',label:'MCP Server'},
+  {id:'curl',label:'cURL / Python'},
 ];
 const ukeOs=[{id:'unix',label:'macOS / Linux'},{id:'win',label:'Windows'}];
-let ukeClient='codex',ukeOsSel='unix';
+let ukeClient='claude',ukeOsSel='unix';
 
 async function openUseKey(id){
   useKeyId=id;
@@ -1484,7 +1486,7 @@ async function openUseKey(id){
 }
 function closeUseKey(){$('useKeyModal').classList.remove('open');}
 function renderUkeTabs(){
-  $('useKeyClients').innerHTML=ukeClients.map(c=>`<button class="uke-tab ${c.id===ukeClient?'active':''}" onclick="ukeClient='${c.id}';renderUkeTabs();renderUkeFiles()"><i data-lucide="${c.id==='codex'?'terminal':c.id==='curl'?'square-terminal':c.id==='claude'?'sparkles':'braces'}"></i>${c.label}</button>`).join('');
+  $('useKeyClients').innerHTML=ukeClients.map(c=>`<button class="uke-tab ${c.id===ukeClient?'active':''}" onclick="ukeClient='${c.id}';renderUkeTabs();renderUkeFiles()"><i data-lucide="${c.id==='codex'?'terminal':c.id==='curl'?'square-terminal':c.id==='claude'?'sparkles':c.id==='mcp'?'cpu':'braces'}"></i>${c.label}</button>`).join('');
   $('useKeyOs').innerHTML=ukeOs.map(o=>`<button class="uke-tab ${o.id===ukeOsSel?'active':''}" onclick="ukeOsSel='${o.id}';renderUkeFiles()">${o.label}</button>`).join('');
   try{lucide.createIcons();}catch(e){}
 }
@@ -1499,43 +1501,20 @@ function renderUkeFiles(){
   const base=location.origin;
   const key=$('useKeyVal').value||useKeyPrefix;
   let html='';
-  if(ukeClient==='curl'){
-    html=ukeFile('Terminal',`curl ${base}/v1/chat/completions \\
-  -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer ${key} \\
-  -d '{"model":"auto","messages":[{"role":"user","content":"Say hello in one sentence."}]}'`);
-  }else if(ukeClient==='codex'){
-    const cfg=`model_provider = "OpenAI"
-model = "auto"
-review_model = "auto"
-
-[model_providers.OpenAI]
-name = "M365 Gateway"
-base_url = "${base}/v1"
-wire_api = "responses"
-requires_openai_auth = true
-
-[features]
-goals = true`;
-    html=ukeFile(ukeOsSel==='unix'?'~/.codex/config.toml':'%USERPROFILE%\\.codex\\config.toml',cfg);
-    html+=ukeFile('~/.codex/auth.json',`{
-  "OPENAI_API_KEY": "${key}"
-}`);
-    if(ukeOsSel==='win'){
-      html+=ukeFile('PowerShell',`$env:OPENAI_API_KEY = "${key}"`);
-    }else{
-      html+=ukeFile('Terminal',`export OPENAI_API_KEY="${key}"`);
-    }
-  }else if(ukeClient==='claude'){
+  if(ukeClient==='claude'){
     const cfg=`{
   "env": {
     "ANTHROPIC_BASE_URL": "${base}",
-    "ANTHROPIC_AUTH_TOKEN": "${key}",
-    "ANTHROPIC_MODEL": "claude-sonnet"
+    "ANTHROPIC_API_KEY": "${key}",
+    "ANTHROPIC_MODEL": "gpt-5.6-sol"
   }
 }`;
     html=ukeFile(ukeOsSel==='unix'?'~/.claude/settings.json':'%USERPROFILE%\\.claude\\settings.json',cfg);
-    html+=ukeFile(ukeOsSel==='unix'?'Terminal':'PowerShell',(ukeOsSel==='win'?'$env:ANTHROPIC_AUTH_TOKEN="'+key+'"':'export ANTHROPIC_AUTH_TOKEN="'+key+'"'));
+    if(ukeOsSel==='win'){
+      html+=ukeFile('PowerShell',`$env:ANTHROPIC_BASE_URL = "${base}"\n$env:ANTHROPIC_API_KEY = "${key}"\n$env:ANTHROPIC_MODEL = "gpt-5.6-sol"`);
+    }else{
+      html+=ukeFile('Terminal',`export ANTHROPIC_BASE_URL="${base}"\nexport ANTHROPIC_API_KEY="${key}"\nexport ANTHROPIC_MODEL="gpt-5.6-sol"`);
+    }
   }else if(ukeClient==='opencode'){
     const cfg=`{
   "$schema": "https://opencode.ai/config.json",
@@ -1548,14 +1527,74 @@ goals = true`;
         "apiKey": "${key}"
       },
       "models": {
-        "auto": {
-          "name": "M365 auto"
+        "gpt-5.6-sol": {
+          "name": "GPT-5.6 Sol (Reasoning Low)"
+        },
+        "gpt-5.6-terra": {
+          "name": "GPT-5.6 Terra (Reasoning Medium)"
         }
       }
     }
   }
 }`;
     html=ukeFile('opencode.json',cfg);
+  }else if(ukeClient==='codex'){
+    const cfg=`model_provider = "OpenAI"
+model = "gpt-5.6-sol"
+review_model = "gpt-5.6-sol"
+
+[model_providers.OpenAI]
+name = "M365 Gateway"
+base_url = "${base}/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[features]
+goals = true`;
+    html=ukeFile(ukeOsSel==='unix'?'~/.codex/config.toml':'%USERPROFILE%\\.codex\\config.toml',cfg);
+    html+=ukeFile('~/.codex/auth.json',`{\n  "OPENAI_API_KEY": "${key}"\n}`);
+    if(ukeOsSel==='win'){
+      html+=ukeFile('PowerShell',`$env:OPENAI_API_KEY = "${key}"`);
+    }else{
+      html+=ukeFile('Terminal',`export OPENAI_API_KEY="${key}"`);
+    }
+  }else if(ukeClient==='cursor'){
+    const cfg=`{
+  "openai.apiBaseUrl": "${base}/v1",
+  "openai.apiKey": "${key}",
+  "openai.model": "gpt-5.6-sol"
+}`;
+    html=ukeFile('Cursor / VS Code Settings',cfg);
+    html+=ukeFile('.env',`OPENAI_BASE_URL=${base}/v1\nOPENAI_API_KEY=${key}\nANTHROPIC_BASE_URL=${base}\nANTHROPIC_API_KEY=${key}`);
+  }else if(ukeClient==='mcp'){
+    const cfg=`{
+  "mcpServers": {
+    "m365-gateway": {
+      "url": "${base}/v1/mcp/sse",
+      "headers": {
+        "Authorization": "Bearer ${key}"
+      }
+    }
+  }
+}`;
+    html=ukeFile('claude_desktop_config.json / mcp.json',cfg);
+  }else if(ukeClient==='curl'){
+    html=ukeFile('cURL',`curl ${base}/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${key}" \\
+  -d '{"model":"gpt-5.6-sol","messages":[{"role":"user","content":"Hello world"}],"stream":true}'`);
+    html+=ukeFile('Python (OpenAI SDK)',`from openai import OpenAI
+
+client = OpenAI(
+    base_url="${base}/v1",
+    api_key="${key}"
+)
+
+resp = client.chat.completions.create(
+    model="gpt-5.6-sol",
+    messages=[{"role": "user", "content": "Hello"}]
+)
+print(resp.choices[0].message.content)`);
   }
   $('useKeyFiles').innerHTML=html;
 }

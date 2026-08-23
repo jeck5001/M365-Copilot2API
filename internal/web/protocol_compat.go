@@ -200,24 +200,52 @@ type anthropicTool struct {
 	InputSchema map[string]any `json:"input_schema"`
 }
 type anthropicRequest struct {
-	Model      string             `json:"model"`
-	System     any                `json:"system,omitempty"`
-	Messages   []anthropicMessage `json:"messages"`
-	Tools      []anthropicTool    `json:"tools,omitempty"`
-	ToolChoice any                `json:"tool_choice,omitempty"`
-	Stream     bool               `json:"stream,omitempty"`
-	MaxTokens  int                `json:"max_tokens,omitempty"`
-	StopSequences []string       `json:"stop_sequences,omitempty"`
+	Model         string             `json:"model"`
+	System        any                `json:"system,omitempty"`
+	Messages      []anthropicMessage `json:"messages"`
+	Tools         []anthropicTool    `json:"tools,omitempty"`
+	ToolChoice    any                `json:"tool_choice,omitempty"`
+	Stream        bool               `json:"stream,omitempty"`
+	MaxTokens     int                `json:"max_tokens,omitempty"`
+	StopSequences []string           `json:"stop_sequences,omitempty"`
+	Thinking      any                `json:"thinking,omitempty"`
+}
+
+func normalizeAnthropicModel(model string) string {
+	m := strings.TrimSpace(model)
+	if m == "" {
+		return "gpt-5.6-sol"
+	}
+	low := strings.ToLower(m)
+	if strings.Contains(low, "claude") || strings.Contains(low, "sonnet") || strings.Contains(low, "opus") || strings.Contains(low, "haiku") {
+		return "gpt-5.6-sol"
+	}
+	return m
 }
 
 func (r anthropicRequest) openAI() (oaiReq, error) {
-	o := oaiReq{Model: r.Model, Stream: r.Stream}
+	model := normalizeAnthropicModel(r.Model)
+	o := oaiReq{Model: model, Stream: r.Stream}
 	if r.MaxTokens > 0 {
 		mt := r.MaxTokens
 		o.MaxCompletionTokens = &mt
 	}
 	if len(r.StopSequences) > 0 {
 		o.Stop = r.StopSequences
+	}
+	if r.Thinking != nil {
+		if tm, ok := r.Thinking.(map[string]any); ok {
+			if typ, _ := tm["type"].(string); typ == "enabled" {
+				budget, _ := tm["budget_tokens"].(float64)
+				if budget >= 2000 {
+					o.ReasoningEffort = "high"
+				} else if budget > 0 {
+					o.ReasoningEffort = "medium"
+				} else {
+					o.ReasoningEffort = "low"
+				}
+			}
+		}
 	}
 	if r.System != nil {
 		o.Messages = append(o.Messages, oaiMsg{Role: "system", Content: r.System})
@@ -242,6 +270,13 @@ func (r anthropicRequest) openAI() (oaiReq, error) {
 			switch typ {
 			case "text":
 				text = append(text, b)
+			case "thinking":
+				if th, _ := b["thinking"].(string); th != "" {
+					text = append(text, map[string]any{
+						"type": "text",
+						"text": "[thinking]\n" + th + "\n[/thinking]",
+					})
+				}
 			case "image":
 				source, _ := b["source"].(map[string]any)
 				if source != nil {
@@ -273,7 +308,19 @@ func (r anthropicRequest) openAI() (oaiReq, error) {
 				calls = append(calls, map[string]any{"id": b["id"], "type": "function", "function": map[string]any{"name": b["name"], "arguments": mustJSON(b["input"])}})
 			case "tool_result":
 				id, _ := b["tool_use_id"].(string)
-				o.Messages = append(o.Messages, oaiMsg{Role: "tool", ToolCallID: id, Content: b["content"]})
+				resultContent := b["content"]
+				if innerBlocks, ok := resultContent.([]any); ok {
+					var bld strings.Builder
+					for _, ib := range innerBlocks {
+						if ibm, ok := ib.(map[string]any); ok {
+							if t, ok := ibm["text"].(string); ok {
+								bld.WriteString(t)
+							}
+						}
+					}
+					resultContent = bld.String()
+				}
+				o.Messages = append(o.Messages, oaiMsg{Role: "tool", ToolCallID: id, Content: resultContent})
 			}
 		}
 		if len(text) > 0 || len(calls) > 0 {

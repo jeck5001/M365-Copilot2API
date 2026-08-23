@@ -400,6 +400,295 @@ func responsesOutputHasContent(src map[string]any) bool {
 	return strings.TrimSpace(text) != ""
 }
 
+func (s *Server) streamAnthropicAdapter(w http.ResponseWriter, r *http.Request, o oaiReq, model string, startedAt time.Time) {
+	o.Stream = true
+	b, _ := json.Marshal(o)
+	r2 := r.Clone(r.Context())
+	r2.Method = http.MethodPost
+	r2.Body = io.NopCloser(bytes.NewReader(b))
+	r2.ContentLength = int64(len(b))
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	irw := &pipeResponseWriter{h: make(http.Header), w: pw}
+	innerDone := make(chan struct{})
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("[anthropic-stream] inner goroutine panic: %v", rec)
+			}
+			_ = pw.Close()
+			close(innerDone)
+		}()
+		s.openaiChat(irw, r2)
+	}()
+	translateChatStreamToAnthropic(w, r, model, o, pr, innerDone, func() int { return irw.status }, s.usage, startedAt)
+}
+
+func translateChatStreamToAnthropic(w http.ResponseWriter, r *http.Request, model string, o oaiReq, src io.Reader, innerDone <-chan struct{}, innerStatus func() int, usage *usageLog, startedAt time.Time) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher, _ := w.(http.Flusher)
+	emit := func(name string, v any) error {
+		return writeSSE(r, w, flusher, name, v)
+	}
+	id := "msg_" + uuid.NewString()
+
+	estimate := estimateResponsesUsage(model, o.Messages, o.Tools, o.ToolChoice, "")
+	inputTokens := int64(estimate.Values["input_tokens"].(int))
+
+	emit("message_start", map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id":            id,
+			"type":          "message",
+			"role":          "assistant",
+			"model":         model,
+			"content":       []any{},
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage": map[string]any{
+				"input_tokens":                inputTokens,
+				"output_tokens":               0,
+				"cache_creation_input_tokens": 0,
+				"cache_read_input_tokens":     0,
+			},
+		},
+	})
+
+	var text strings.Builder
+	var reasoning strings.Builder
+	textStarted := false
+	reasoningStarted := false
+	textBlockIndex := 0
+	reasoningBlockIndex := 0
+	nextBlockIndex := 0
+
+	type anthropicToolCallState struct {
+		BlockIndex int
+		ID         string
+		Name       string
+		Args       strings.Builder
+		Started    bool
+	}
+	calls := map[int]*anthropicToolCallState{}
+	streamErr := ""
+	scanner := bufio.NewScanner(src)
+	scanner.Buffer(make([]byte, 4096), 2<<20)
+
+	for scanner.Scan() {
+		if r.Context().Err() != nil {
+			return
+		}
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+			continue
+		}
+		var chunk map[string]any
+		if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk) != nil {
+			continue
+		}
+		if errFrame, ok := chunk["error"].(map[string]any); ok {
+			streamErr, _ = errFrame["message"].(string)
+			if streamErr == "" {
+				streamErr = "upstream stream failed"
+			}
+			continue
+		}
+		choices, _ := chunk["choices"].([]any)
+		if len(choices) == 0 {
+			continue
+		}
+		choice, _ := choices[0].(map[string]any)
+		delta, _ := choice["delta"].(map[string]any)
+
+		if reasonContent, ok := delta["reasoning_content"].(string); ok && reasonContent != "" {
+			reasoning.WriteString(reasonContent)
+			if !reasoningStarted {
+				reasoningStarted = true
+				reasoningBlockIndex = nextBlockIndex
+				nextBlockIndex++
+				emit("content_block_start", map[string]any{
+					"type":          "content_block_start",
+					"index":         reasoningBlockIndex,
+					"content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
+				})
+			}
+			emit("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": reasoningBlockIndex,
+				"delta": map[string]any{"type": "thinking_delta", "thinking": reasonContent},
+			})
+		}
+
+		if content, ok := delta["content"].(string); ok && content != "" {
+			text.WriteString(content)
+			if !textStarted {
+				if reasoningStarted {
+					emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": reasoningBlockIndex})
+				}
+				textStarted = true
+				textBlockIndex = nextBlockIndex
+				nextBlockIndex++
+				emit("content_block_start", map[string]any{
+					"type":          "content_block_start",
+					"index":         textBlockIndex,
+					"content_block": map[string]any{"type": "text", "text": ""},
+				})
+			}
+			emit("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": textBlockIndex,
+				"delta": map[string]any{"type": "text_delta", "text": content},
+			})
+		}
+
+		if rawCalls, ok := delta["tool_calls"].([]any); ok {
+			for _, raw := range rawCalls {
+				tc, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				idxFloat, ok := tc["index"].(float64)
+				if !ok {
+					continue
+				}
+				idx := int(idxFloat)
+				st := calls[idx]
+				if st == nil {
+					st = &anthropicToolCallState{BlockIndex: nextBlockIndex}
+					nextBlockIndex++
+					calls[idx] = st
+				}
+				if v, ok := tc["id"].(string); ok && v != "" {
+					st.ID = v
+				}
+				fn, _ := tc["function"].(map[string]any)
+				if fn != nil {
+					if v, ok := fn["name"].(string); ok && v != "" {
+						st.Name += v
+					}
+					if v, ok := fn["arguments"].(string); ok {
+						st.Args.WriteString(v)
+						if !st.Started {
+							st.Started = true
+							if st.ID == "" {
+								st.ID = "call_" + uuid.NewString()
+							}
+							emit("content_block_start", map[string]any{
+								"type":          "content_block_start",
+								"index":         st.BlockIndex,
+								"content_block": map[string]any{"type": "tool_use", "id": st.ID, "name": st.Name, "input": map[string]any{}},
+							})
+						}
+						emit("content_block_delta", map[string]any{
+							"type":  "content_block_delta",
+							"index": st.BlockIndex,
+							"delta": map[string]any{"type": "input_json_delta", "partial_json": v},
+						})
+					}
+				}
+			}
+		}
+	}
+
+	<-innerDone
+	if scanner.Err() != nil || innerStatus() >= http.StatusBadRequest {
+		status := innerStatus()
+		if status == 0 {
+			status = http.StatusBadGateway
+		}
+		emit("error", map[string]any{
+			"type":  "error",
+			"error": map[string]any{"type": "api_error", "message": "inner chat request failed"},
+		})
+		return
+	}
+	if streamErr != "" {
+		emit("error", map[string]any{
+			"type":  "error",
+			"error": map[string]any{"type": "api_error", "message": streamErr},
+		})
+		return
+	}
+
+	if reasoningStarted && !textStarted && len(calls) == 0 {
+		emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": reasoningBlockIndex})
+	}
+	if textStarted {
+		emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": textBlockIndex})
+	}
+
+	toolKeys := make([]int, 0, len(calls))
+	for k := range calls {
+		toolKeys = append(toolKeys, k)
+	}
+	sort.Ints(toolKeys)
+	for _, k := range toolKeys {
+		st := calls[k]
+		if st == nil {
+			continue
+		}
+		if !st.Started {
+			if st.ID == "" {
+				st.ID = "call_" + uuid.NewString()
+			}
+			emit("content_block_start", map[string]any{
+				"type":          "content_block_start",
+				"index":         st.BlockIndex,
+				"content_block": map[string]any{"type": "tool_use", "id": st.ID, "name": st.Name, "input": map[string]any{}},
+			})
+			if st.Args.Len() > 0 {
+				emit("content_block_delta", map[string]any{
+					"type":  "content_block_delta",
+					"index": st.BlockIndex,
+					"delta": map[string]any{"type": "input_json_delta", "partial_json": st.Args.String()},
+				})
+			}
+		}
+		emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": st.BlockIndex})
+	}
+
+	stopReason := "end_turn"
+	if len(calls) > 0 {
+		stopReason = "tool_use"
+	}
+
+	outputContent := text.String()
+	for _, k := range toolKeys {
+		if st := calls[k]; st != nil {
+			outputContent += st.Name + st.Args.String()
+		}
+	}
+	outEstimate := estimateResponsesUsage(model, o.Messages, o.Tools, o.ToolChoice, outputContent)
+	outputTokens := int64(outEstimate.Values["output_tokens"].(int))
+
+	emit("message_delta", map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{
+			"stop_reason":   stopReason,
+			"stop_sequence": nil,
+		},
+		"usage": map[string]any{
+			"output_tokens": outputTokens,
+		},
+	})
+	emit("message_stop", map[string]any{"type": "message_stop"})
+
+	if usage != nil {
+		usage.record(UsageRecord{
+			Time:         time.Now(),
+			APIKeyPrefix: extractAPIKey(r),
+			Model:        model,
+			Endpoint:     "/v1/messages",
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
+			DurationMs:   time.Since(startedAt).Milliseconds(),
+			Status:       200,
+		})
+	}
+}
+
 func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 	startedAt := time.Now()
 	if r.Method != http.MethodPost {
@@ -416,6 +705,10 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, 400, "invalid_request_error", err.Error())
 		return
 	}
+	if body.Stream {
+		s.streamAnthropicAdapter(w, r, o, firstNonEmpty(o.Model, "m365-copilot"), startedAt)
+		return
+	}
 	out, raw, status, err := s.runOpenAIAdapter(r, o)
 	if status >= 400 {
 		writeAnthropicError(w, status, "api_error", errorMessage(raw, "upstream protocol error"))
@@ -425,16 +718,16 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", "upstream protocol error: "+err.Error())
 		return
 	}
-	estimate := estimateResponsesUsage(firstNonEmpty(body.Model, "m365-copilot"), o.Messages, o.Tools, o.ToolChoice, "")
+	estimate := estimateResponsesUsage(firstNonEmpty(o.Model, "m365-copilot"), o.Messages, o.Tools, o.ToolChoice, "")
 	s.usage.record(UsageRecord{
 		Time:         time.Now(),
 		APIKeyPrefix: extractAPIKey(r),
-		Model:        firstNonEmpty(body.Model, "m365-copilot"),
+		Model:        firstNonEmpty(o.Model, "m365-copilot"),
 		Endpoint:     "/v1/messages",
 		InputTokens:  int64(estimate.Values["input_tokens"].(int)),
 		OutputTokens: int64(estimate.Values["output_tokens"].(int)),
 		DurationMs:   time.Since(startedAt).Milliseconds(),
 		Status:       200,
 	})
-	writeAnthropicResult(w, firstNonEmpty(body.Model, "m365-copilot"), body.Stream, out)
+	writeAnthropicResult(w, firstNonEmpty(o.Model, "m365-copilot"), body.Stream, out)
 }
