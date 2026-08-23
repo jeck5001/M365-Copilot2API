@@ -1507,6 +1507,18 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	effectiveEffort := effort
+	if effectiveEffort == "" {
+		for _, m := range s.settings.get().ModelMappings {
+			if strings.EqualFold(m.PublicModel, body.Model) {
+				effectiveEffort = m.DefaultReasoningLevel
+				break
+			}
+		}
+	}
+	if effectiveEffort == "high" || effectiveEffort == "xhigh" {
+		prompt = "[system]\nYou must think deeply, comprehensively, and step-by-step using extensive chain-of-thought analysis before providing your final response. Verify all edge cases and provide the full, unabbreviated implementation.\n\n" + prompt
+	}
 	if prompt == "" {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "messages required")
 		return
