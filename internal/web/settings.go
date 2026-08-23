@@ -104,6 +104,9 @@ var openSettingsStore = sync.OnceValue(func() *settingsStore {
 	s := &settingsStore{path: settingsPath(), v: defaultRuntimeSettings()}
 	if b, e := os.ReadFile(s.path); e == nil {
 		_ = json.Unmarshal(b, &s.v)
+		if len(s.v.ModelMappings) == 0 {
+			s.v.ModelMappings = append([]modelMapping(nil), defaultModelMappings...)
+		}
 	}
 	if e := validateSettings(s.v); e != nil {
 		log.Printf("[settings] invalid persisted settings: %v", e)
