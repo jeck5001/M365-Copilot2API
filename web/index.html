@@ -1463,6 +1463,7 @@ function ugPage(delta){
 }
 
 // ===== Use API modal =====
+let useKeyId='',useKeyPrefix='',modelTestKey='';
 const ukeClients=[
   {id:'claude',label:'Claude Code'},
   {id:'opencode',label:'OpenCode'},
@@ -1479,8 +1480,9 @@ async function openUseKey(id){
   const d=await api('/api/admin/keys');
   const rec=(d.keys||[]).find(x=>x.id===id);
   if(!rec){showNotice(t('Key not found'),'error');return;}
+  useKeyPrefix=rec.prefix||'';
   $('useKeyName').textContent=t('Current key')+': '+rec.name+' ('+rec.prefix+')';
-  $('useKeyVal').value=rec.raw||'';
+  $('useKeyVal').value=rec.raw||rec.prefix||'';
   $('useKeyModal').classList.add('open');
   renderUkeTabs();
   renderUkeFiles();
@@ -1488,7 +1490,7 @@ async function openUseKey(id){
 function closeUseKey(){$('useKeyModal').classList.remove('open');}
 function renderUkeTabs(){
   $('useKeyClients').innerHTML=ukeClients.map(c=>`<button class="uke-tab ${c.id===ukeClient?'active':''}" onclick="ukeClient='${c.id}';renderUkeTabs();renderUkeFiles()"><i data-lucide="${c.id==='codex'?'terminal':c.id==='curl'?'square-terminal':c.id==='claude'?'sparkles':c.id==='mcp'?'cpu':'braces'}"></i>${c.label}</button>`).join('');
-  $('useKeyOs').innerHTML=ukeOs.map(o=>`<button class="uke-tab ${o.id===ukeOsSel?'active':''}" onclick="ukeOsSel='${o.id}';renderUkeFiles()">${o.label}</button>`).join('');
+  $('useKeyOs').innerHTML=ukeOs.map(o=>`<button class="uke-tab ${o.id===ukeOsSel?'active':''}" onclick="ukeOsSel='${o.id}';renderUkeTabs();renderUkeFiles()">${o.label}</button>`).join('');
   try{lucide.createIcons();}catch(e){}
 }
 function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
@@ -1500,7 +1502,7 @@ function ukeFile(path,content){
 }
 function renderUkeFiles(){
   const base=location.origin;
-  const key=$('useKeyVal').value||useKeyPrefix;
+  const key=$('useKeyVal').value||useKeyPrefix||'YOUR_API_KEY';
   let html='';
   if(ukeClient==='claude'){
     const cfg=`{
