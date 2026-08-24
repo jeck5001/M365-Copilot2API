@@ -13,13 +13,16 @@ func modelToolRouterPrompt(prompt string, tools []map[string]any, choice any) st
 - If no tool is needed, respond with: NO_TOOL_NEEDED
 - Only use tools from the available list above
 - Validate all arguments against the tool's schema
-- Do not invent tools that are not in the list`
+- Do not invent tools that are not in the list
+- For exploration, analysis, or inspection tasks, continue calling tools until you have gathered all necessary information and files. Do NOT output a plan or intention to check something next without calling the tool; call the tool immediately using CALL_TOOL:.
+- Never output explanatory text before CALL_TOOL: or NO_TOOL_NEEDED`
 	// Multi-turn: completed tool evidence (tool[...], tool_calls:) was already
 	// acted upon, so re-invoking those tools would duplicate work.
 	if strings.Contains(prompt, "tool_calls:") || strings.Contains(prompt, "tool[call_") {
 		rules += `
 - Completed evidence must not be repeated: tool_calls/tool[call_x] rows are prior results already delivered to the user, never re-invoke them
-- Only start a new tool call when fresh unfinished work remains on the current request`
+- Only start a new tool call when fresh unfinished work remains on the current request
+- If you still need to inspect more files or verify more details to fulfill the request, call the tool now`
 	}
 	return fmt.Sprintf(`You are a tool selection assistant. Based on the user request, decide which tool to call next.
 
@@ -36,29 +39,29 @@ User request and evidence:
 
 func parseModelToolDecision(text string, tools []map[string]any, choice any) ([]detectedToolCall, bool) {
 	text = strings.TrimSpace(text)
-	// Try the new natural language format first: CALL_TOOL: name({...})
-	if strings.HasPrefix(text, "CALL_TOOL:") || strings.HasPrefix(text, "call_tool:") {
-		parts := strings.SplitN(text, ":", 2)
-		if len(parts) == 2 {
-			rest := strings.TrimSpace(parts[1])
-			start := strings.Index(rest, "(")
-			end := strings.LastIndex(rest, ")")
-			if start > 0 && end > start {
-				name := strings.TrimSpace(rest[:start])
-				argsStr := rest[start+1 : end]
-				var args map[string]any
-				if json.Unmarshal([]byte(argsStr), &args) == nil && toolChoiceAllows(choice, name) {
-					fn := toolFunction(name, tools)
-					if fn != nil && schemaValid(args, fn) == nil {
-						b, _ := json.Marshal(args)
-						return []detectedToolCall{{ID: callID(name, string(b), 0), Type: toolType(name, tools), Name: name, Arguments: b}}, true
-					}
+	upper := strings.ToUpper(text)
+	if idx := strings.Index(upper, "CALL_TOOL:"); idx >= 0 {
+		rest := strings.TrimSpace(text[idx+len("CALL_TOOL:"):])
+		start := strings.Index(rest, "(")
+		end := strings.LastIndex(rest, ")")
+		if start > 0 && end > start {
+			name := strings.TrimSpace(rest[:start])
+			argsStr := rest[start+1 : end]
+			var args map[string]any
+			if json.Unmarshal([]byte(argsStr), &args) == nil && toolChoiceAllows(choice, name) {
+				fn := toolFunction(name, tools)
+				if fn != nil && schemaValid(args, fn) == nil {
+					b, _ := json.Marshal(args)
+					return []detectedToolCall{{ID: callID(name, string(b), 0), Type: toolType(name, tools), Name: name, Arguments: b}}, true
 				}
 			}
 		}
 	}
 	if strings.Contains(text, "NO_TOOL_NEEDED") || strings.Contains(text, "no_tool_needed") {
 		return nil, true
+	}
+	if fenced := fencedToolCalls(text, tools, choice); len(fenced) > 0 {
+		return fenced, true
 	}
 	// Fallback: try the old JSON format
 	if i := strings.Index(text, "```"); i >= 0 {

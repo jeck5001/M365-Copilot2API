@@ -1522,7 +1522,7 @@ func buildAnswerRequest(answerPrompt, tone string, body oaiReq, ledger agentLedg
 		answerPrompt += "\n" + ledger.RouterContext()
 	}
 	if len(ledger.Completed) > 0 {
-		answerPrompt += "\nFINAL ANSWER RULE: Answer the user's request thoroughly using evidence from completed tool results. When asked for analysis, explanation, or summary, provide a comprehensive structured response based on the observed evidence. Report only actions supported by completed tool results. If the goal is not fully verified, state exactly what remains unconfirmed."
+		answerPrompt += "\nFINAL ANSWER RULE: Answer the user's request thoroughly using evidence from completed tool results. When asked for analysis, explanation, or summary, provide a comprehensive structured response based on the observed evidence. Report only actions supported by completed tool results. If the goal is not fully verified, state exactly what remains unconfirmed. Do NOT output only an intention or future plan of what you will inspect next; deliver the complete findings and conclusions directly."
 	}
 	req := chathub.Request{Text: answerPrompt, Tone: tone, ConversationID: body.ConversationID, SessionID: body.SessionID, Attachments: body.Attachments, LicenseType: cfg.LicenseType, Scenario: cfg.Scenario, FeatureFlags: flags, Locale: locale.Locale, Market: locale.Market, TimeZone: locale.TimeZone, TimeZoneOffset: locale.TimeZoneOffset, DeviceOS: locale.DeviceOS}
 	if planningMode == "native" {
@@ -2042,6 +2042,11 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		if len(rawCalls) == 0 {
 			rawCalls = fencedToolCalls(text.String(), toolMaps, body.ToolChoice)
 		}
+		if len(rawCalls) == 0 {
+			if parsedCalls, ok := parseModelToolDecision(text.String(), toolMaps, body.ToolChoice); ok && len(parsedCalls) > 0 {
+				rawCalls = parsedCalls
+			}
+		}
 		calls, rejected := validateCalls("stream", rawCalls)
 		toolResult := chathub.Result{Text: text.String()}
 		if len(calls) == 0 && rejected > 0 {
@@ -2468,7 +2473,13 @@ APPLICATION_REQUEST_AND_EVIDENCE:
 		}
 	}
 	invalidDetectedTool := false
-	if rawCalls := fencedToolCalls(res.Text, toolMaps, body.ToolChoice); len(rawCalls) > 0 {
+	rawCalls := fencedToolCalls(res.Text, toolMaps, body.ToolChoice)
+	if len(rawCalls) == 0 {
+		if parsedCalls, ok := parseModelToolDecision(res.Text, toolMaps, body.ToolChoice); ok && len(parsedCalls) > 0 {
+			rawCalls = parsedCalls
+		}
+	}
+	if len(rawCalls) > 0 {
 		calls, rejected := validateCalls("fenced", rawCalls)
 		invalidDetectedTool = rejected > 0
 		if len(calls) > 0 {
