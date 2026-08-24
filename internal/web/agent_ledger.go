@@ -38,7 +38,7 @@ func maxToolResultBytes() int {
 			return n
 		}
 	}
-	return 65536
+	return 12000
 }
 
 func compactToolResult(s string, limit int) string {

@@ -40,7 +40,15 @@ var contentPolicyPatterns = []string{
 	"抱歉，我无法",
 	"i'm sorry, i can't respond",
 	"i'm sorry, i cannot respond",
+	"sorry, i wasn't able to respond",
+	"i wasn't able to respond",
+	"wasn't able to respond to that",
+	"unable to respond to that",
+	"sorry, i am unable to respond",
+	"sorry, i'm unable to respond",
 	"i apologize, i cannot",
+	"is there something else i can help with",
+	"is there anything else i can help with",
 }
 
 func IsContentPolicyBlock(text string) bool {

@@ -29,9 +29,13 @@ type sessionStore struct {
 }
 
 func openSessionStore() *sessionStore {
-	path := os.Getenv("M365_SESSION_CACHE")
+	path := os.Getenv("M365_LEGACY_SESSION_CACHE")
 	if path == "" {
-		path = filepath.Join(os.TempDir(), "m365-copilot2api-sessions.json")
+		if base := os.Getenv("M365_SESSION_CACHE"); base != "" {
+			path = filepath.Join(filepath.Dir(base), "legacy-"+filepath.Base(base))
+		} else {
+			path = filepath.Join(os.TempDir(), "m365-copilot2api-legacy-sessions.json")
+		}
 	}
 	s := &sessionStore{path: path, data: map[string]conversation{}}
 	s.persist = &persistStore{flush: s.flush}
