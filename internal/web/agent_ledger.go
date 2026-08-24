@@ -32,20 +32,32 @@ type agentLedger struct {
 var failureSignal = regexp.MustCompile(`(?i)(exit\s*(code|status)?\s*[:=]?\s*[1-9]\d*|\berror\b|\bfailed\b|\bfailure\b|exception|traceback|timed?\s*out|permission denied|not found|refused)`)
 var unsupportedSuccess = regexp.MustCompile(`(?i)\b(installed|created|written|executed|ran|started|deployed|deleted|verified|completed|succeeded|successful(?:ly)?)\b`)
 
+func maxToolResultBytes() int {
+	if v := os.Getenv("M365_MAX_TOOL_RESULT_BYTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 65536
+}
+
 func compactToolResult(s string, limit int) string {
 	s = strings.TrimSpace(s)
+	if limit <= 0 {
+		limit = maxToolResultBytes()
+	}
 	if limit < 200 {
 		limit = 200
 	}
 	if len(s) <= limit {
 		return s
 	}
-	head := limit / 3
-	tail := limit - head - 80
-	if tail < 80 {
-		tail = 80
+	head := (limit * 3) / 5
+	tail := limit - head - 100
+	if tail < 100 {
+		tail = 100
 	}
-	return s[:head] + fmt.Sprintf("\n... [truncated %d bytes] ...\n", len(s)-head-tail) + s[len(s)-tail:]
+	return s[:head] + fmt.Sprintf("\n... [truncated %d bytes, total %d bytes] ...\n", len(s)-head-tail, len(s)) + s[len(s)-tail:]
 }
 
 // scopedCallID returns a globally unique tool call id. The scope parameters
@@ -74,7 +86,7 @@ func buildAgentLedger(messages []oaiMsg) agentLedger {
 		}
 		if m.Role == "tool" {
 			if e, ok := calls[m.ToolCallID]; ok {
-				e.Result = compactToolResult(contentToString(m.Content), 16000)
+				e.Result = compactToolResult(contentToString(m.Content), maxToolResultBytes())
 				e.Failed = failureSignal.MatchString(e.Result)
 				calls[m.ToolCallID] = e
 			}

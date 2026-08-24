@@ -54,7 +54,7 @@ func flattenPromptMessages(messages []oaiMsg, attachments []chathub.Attachment) 
 			continue
 		}
 		if role == "tool" {
-			txt = compactToolResult(txt, 16000)
+			txt = compactToolResult(txt, maxToolResultBytes())
 			b.WriteString(fmt.Sprintf("\n[tool result id=%s]\n%s\n", m.ToolCallID, txt))
 			continue
 		}

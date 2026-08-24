@@ -800,6 +800,7 @@ func (s *Server) provisionAccount(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusInternalServerError, "upsert_error", err.Error())
 		return
 	}
+	s.InitM365CloudClient()
 	jsonOut(w, map[string]any{"status": "provisioned", "account": map[string]any{
 		"id": acc.ID, "email": acc.Email, "displayName": acc.DisplayName,
 		"status": acc.Status, "expiresAt": acc.ExpiresAt,
@@ -977,6 +978,7 @@ func (s *Server) callbackPKCE(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
+	s.InitM365CloudClient()
 	s.mu.Lock()
 	p.Status = "authenticated"
 	p.Account = map[string]any{"id": acc.ID, "email": acc.Email, "displayName": acc.DisplayName, "status": acc.Status, "oid": acc.OID, "tid": acc.TID}

@@ -36,18 +36,16 @@ func IsRateLimited(err error) bool {
 	}
 	var httpErr *UpstreamHTTPError
 	if errors.As(err, &httpErr) {
-		if httpErr.Status == 429 {
+		if httpErr.Status == 429 || httpErr.Status == 503 {
 			return true
 		}
-		if httpErr.Status != 401 && httpErr.Status != 403 && httpErr.Status != 503 {
-			if strings.Contains(strings.ToLower(httpErr.Body), "limited") {
-				return true
-			}
+		if strings.Contains(strings.ToLower(httpErr.Body), "limited") {
+			return true
 		}
 	}
 	var dialErr *chathub.DialError
 	if errors.As(err, &dialErr) {
-		return dialErr.Status == 429
+		return dialErr.Status == 429 || dialErr.Status == 503
 	}
 	return false
 }
@@ -90,17 +88,19 @@ func IsTimeout(err error) bool {
 	return strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded")
 }
 
+// IsAuthFailure reports whether err represents an upstream 401/403, meaning
+// the account itself is unusable until re-authenticated.
 func IsAuthFailure(err error) bool {
 	if err == nil {
 		return false
 	}
 	var httpErr *UpstreamHTTPError
 	if errors.As(err, &httpErr) {
-		return httpErr.Status == 401
+		return httpErr.Status == 401 || httpErr.Status == 403
 	}
 	var dialErr *chathub.DialError
 	if errors.As(err, &dialErr) {
-		return dialErr.Status == 401
+		return dialErr.Status == 401 || dialErr.Status == 403
 	}
 	return false
 }
@@ -292,16 +292,6 @@ func (h *accountHealth) MarkFailure(accountID string, err error, window time.Dur
 		}
 		return
 	}
-	if IsPermissionDenied(err) {
-		cooldown := window
-		if cooldown > 5*time.Minute {
-			cooldown = 5 * time.Minute
-		}
-		h.cooldown[accountID] = time.Now().Add(cooldown)
-		delete(h.authFail, accountID)
-		delete(h.limited, accountID)
-		return
-	}
 	if IsRateLimited(err) {
 		delete(h.authFail, accountID)
 		delete(h.authFailReason, accountID)
@@ -309,8 +299,8 @@ func (h *accountHealth) MarkFailure(accountID string, err error, window time.Dur
 		cd := window
 		if ra := RetryAfterSeconds(err); ra > 0 {
 			cd = time.Duration(ra) * time.Second
-			if cd > time.Hour {
-				cd = time.Hour
+			if cd > 30*time.Minute {
+				cd = 30 * time.Minute
 			}
 		}
 		h.cooldown[accountID] = time.Now().Add(cd)

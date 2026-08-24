@@ -619,7 +619,8 @@ if (response.output_text) {
       <!-- Settings -->
       <section id="page-settings" style="display:none">
         <h2 style="font-size:18px;font-weight:700;margin-bottom:16px">Settings</h2>
-        <div class="card"><div class="card-body"><div class="form-group"><label class="form-label">Listen address</label><input class="form-input" id="setListen" placeholder="127.0.0.1:4141"></div><div class="form-group"><label class="form-label">Chat timeout (seconds)</label><input class="form-input" id="setTimeout" type="number" placeholder="120"></div><div class="form-group"><label class="form-label" for="languageSelect">Language</label><select class="form-input" id="languageSelect"><option value="en">English</option><option value="zh-CN">简体中文</option><option value="zh-TW">繁體中文</option><option value="ja">日本語</option><option value="ko">한국어</option><option value="es">Español</option><option value="fr">Français</option><option value="de">Deutsch</option><option value="pt-BR">Português (Brasil)</option><option value="ru">Русский</option><option value="ar">العربية</option></select><p class="form-hint">Choose the language used by the administration console.</p></div><div style="margin-top:16px"><button class="btn primary" onclick="saveSettings()">Save settings</button></div></div></div>
+        <div class="card"><div class="card-body"><div class="form-group"><label class="form-label">Listen address</label><input class="form-input" id="setListen" placeholder="127.0.0.1:4141"></div><div class="form-group"><label class="form-label">Chat timeout (seconds)</label><input class="form-input" id="setTimeout" type="number" placeholder="120"></div><div class="form-group"><label class="form-label" for="languageSelect">Language</label><select class="form-input" id="languageSelect"><option value="en">English</option><option value="zh-CN">简体中文</option><option value="zh-TW">繁體中文</option><option value="ja">日本語</option><option value="ko">한국어</option><option value="es">Español</option><option value="fr">Français</option><option value="de">Deutsch</option><option value="pt-BR">Português (Brasil)</option><option value="ru">Русский</option><option value="ar">العربية</option></select><p class="form-hint">Choose the language used by the administration console.</p></div></div></div>
+        <div class="card" style="margin-top:16px"><div class="card-body"><h3 style="font-size:16px;font-weight:600;margin-bottom:8px">模型映射与推理级别 (Model Mappings & Reasoning)</h3><p class="form-hint" style="margin-bottom:12px">配置公开模型的默认推理级别（Low / Medium / High / xHigh）。设置为 High 或 xHigh 时，网关会自动激活深度思维链（CoT）推理模式。</p><div style="overflow-x:auto"><table class="table" style="margin-bottom:12px"><thead><tr><th>公开模型 ID (Public Model)</th><th>显示名称 (Display Name)</th><th>上游 Tone (Upstream Tone)</th><th>默认推理级别 (Default Reasoning)</th></tr></thead><tbody id="modelMappingRows"><tr><td colspan="4" class="empty">Loading...</td></tr></tbody></table></div><div style="margin-top:16px"><button class="btn primary" onclick="saveSettings()">Save settings</button></div></div></div>
       </section>
     </div>
   </main>
@@ -1033,7 +1034,7 @@ function translatePage(){
   nodes.forEach(n=>{const translated=translateText(n.nodeValue);if(translated!==n.nodeValue)n.nodeValue=translated;});
   document.querySelectorAll('[placeholder],[title],[aria-label]').forEach(el=>['placeholder','title','aria-label'].forEach(attr=>{if(el.hasAttribute(attr))el.setAttribute(attr,translateText(el.getAttribute(attr)));}));
   const selector=$('languageSelect');if(selector)selector.value=currentLocale;
-  document.documentElement.lang=currentLocale;
+document.documentElement.lang=currentLocale;
   document.documentElement.dir=currentLocale==='ar'?'rtl':'ltr';
 }
 function applyLocale(locale){
@@ -1462,30 +1463,34 @@ function ugPage(delta){
 }
 
 // ===== Use API modal =====
-let useKeyId='',useKeyPrefix='',modelTestKey='';const ukeClients=[
-  {id:'curl',label:'curl'},
-  {id:'codex',label:'Codex CLI'},
+let useKeyId='',useKeyPrefix='',modelTestKey='';
+const ukeClients=[
   {id:'claude',label:'Claude Code'},
   {id:'opencode',label:'OpenCode'},
+  {id:'codex',label:'Codex CLI'},
+  {id:'cursor',label:'Cursor / Cline'},
+  {id:'mcp',label:'MCP Server'},
+  {id:'curl',label:'cURL / Python'},
 ];
 const ukeOs=[{id:'unix',label:'macOS / Linux'},{id:'win',label:'Windows'}];
-let ukeClient='codex',ukeOsSel='unix';
+let ukeClient='claude',ukeOsSel='unix';
 
 async function openUseKey(id){
   useKeyId=id;
   const d=await api('/api/admin/keys');
   const rec=(d.keys||[]).find(x=>x.id===id);
   if(!rec){showNotice(t('Key not found'),'error');return;}
+  useKeyPrefix=rec.prefix||'';
   $('useKeyName').textContent=t('Current key')+': '+rec.name+' ('+rec.prefix+')';
-  $('useKeyVal').value=rec.raw||'';
+  $('useKeyVal').value=rec.raw||rec.prefix||'';
   $('useKeyModal').classList.add('open');
   renderUkeTabs();
   renderUkeFiles();
 }
 function closeUseKey(){$('useKeyModal').classList.remove('open');}
 function renderUkeTabs(){
-  $('useKeyClients').innerHTML=ukeClients.map(c=>`<button class="uke-tab ${c.id===ukeClient?'active':''}" onclick="ukeClient='${c.id}';renderUkeTabs();renderUkeFiles()"><i data-lucide="${c.id==='codex'?'terminal':c.id==='curl'?'square-terminal':c.id==='claude'?'sparkles':'braces'}"></i>${c.label}</button>`).join('');
-  $('useKeyOs').innerHTML=ukeOs.map(o=>`<button class="uke-tab ${o.id===ukeOsSel?'active':''}" onclick="ukeOsSel='${o.id}';renderUkeFiles()">${o.label}</button>`).join('');
+  $('useKeyClients').innerHTML=ukeClients.map(c=>`<button class="uke-tab ${c.id===ukeClient?'active':''}" onclick="ukeClient='${c.id}';renderUkeTabs();renderUkeFiles()"><i data-lucide="${c.id==='codex'?'terminal':c.id==='curl'?'square-terminal':c.id==='claude'?'sparkles':c.id==='mcp'?'cpu':'braces'}"></i>${c.label}</button>`).join('');
+  $('useKeyOs').innerHTML=ukeOs.map(o=>`<button class="uke-tab ${o.id===ukeOsSel?'active':''}" onclick="ukeOsSel='${o.id}';renderUkeTabs();renderUkeFiles()">${o.label}</button>`).join('');
   try{lucide.createIcons();}catch(e){}
 }
 function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
@@ -1497,45 +1502,22 @@ function ukeFile(path,content){
 }
 function renderUkeFiles(){
   const base=location.origin;
-  const key=$('useKeyVal').value||useKeyPrefix;
+  const key=$('useKeyVal').value||useKeyPrefix||'YOUR_API_KEY';
   let html='';
-  if(ukeClient==='curl'){
-    html=ukeFile('Terminal',`curl ${base}/v1/chat/completions \\
-  -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer ${key} \\
-  -d '{"model":"auto","messages":[{"role":"user","content":"Say hello in one sentence."}]}'`);
-  }else if(ukeClient==='codex'){
-    const cfg=`model_provider = "OpenAI"
-model = "auto"
-review_model = "auto"
-
-[model_providers.OpenAI]
-name = "M365 Gateway"
-base_url = "${base}/v1"
-wire_api = "responses"
-requires_openai_auth = true
-
-[features]
-goals = true`;
-    html=ukeFile(ukeOsSel==='unix'?'~/.codex/config.toml':'%USERPROFILE%\\.codex\\config.toml',cfg);
-    html+=ukeFile('~/.codex/auth.json',`{
-  "OPENAI_API_KEY": "${key}"
-}`);
-    if(ukeOsSel==='win'){
-      html+=ukeFile('PowerShell',`$env:OPENAI_API_KEY = "${key}"`);
-    }else{
-      html+=ukeFile('Terminal',`export OPENAI_API_KEY="${key}"`);
-    }
-  }else if(ukeClient==='claude'){
+  if(ukeClient==='claude'){
     const cfg=`{
   "env": {
     "ANTHROPIC_BASE_URL": "${base}",
-    "ANTHROPIC_AUTH_TOKEN": "${key}",
-    "ANTHROPIC_MODEL": "claude-sonnet"
+    "ANTHROPIC_API_KEY": "${key}",
+    "ANTHROPIC_MODEL": "gpt-5.6-sol"
   }
 }`;
     html=ukeFile(ukeOsSel==='unix'?'~/.claude/settings.json':'%USERPROFILE%\\.claude\\settings.json',cfg);
-    html+=ukeFile(ukeOsSel==='unix'?'Terminal':'PowerShell',(ukeOsSel==='win'?'$env:ANTHROPIC_AUTH_TOKEN="'+key+'"':'export ANTHROPIC_AUTH_TOKEN="'+key+'"'));
+    if(ukeOsSel==='win'){
+      html+=ukeFile('PowerShell',`$env:ANTHROPIC_BASE_URL = "${base}"\n$env:ANTHROPIC_API_KEY = "${key}"\n$env:ANTHROPIC_MODEL = "gpt-5.6-sol"`);
+    }else{
+      html+=ukeFile('Terminal',`export ANTHROPIC_BASE_URL="${base}"\nexport ANTHROPIC_API_KEY="${key}"\nexport ANTHROPIC_MODEL="gpt-5.6-sol"`);
+    }
   }else if(ukeClient==='opencode'){
     const cfg=`{
   "$schema": "https://opencode.ai/config.json",
@@ -1548,14 +1530,74 @@ goals = true`;
         "apiKey": "${key}"
       },
       "models": {
-        "auto": {
-          "name": "M365 auto"
+        "gpt-5.6-sol": {
+          "name": "GPT-5.6 Sol (Reasoning Low)"
+        },
+        "gpt-5.6-terra": {
+          "name": "GPT-5.6 Terra (Reasoning Medium)"
         }
       }
     }
   }
 }`;
     html=ukeFile('opencode.json',cfg);
+  }else if(ukeClient==='codex'){
+    const cfg=`model_provider = "OpenAI"
+model = "gpt-5.6-sol"
+review_model = "gpt-5.6-sol"
+
+[model_providers.OpenAI]
+name = "M365 Gateway"
+base_url = "${base}/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[features]
+goals = true`;
+    html=ukeFile(ukeOsSel==='unix'?'~/.codex/config.toml':'%USERPROFILE%\\.codex\\config.toml',cfg);
+    html+=ukeFile('~/.codex/auth.json',`{\n  "OPENAI_API_KEY": "${key}"\n}`);
+    if(ukeOsSel==='win'){
+      html+=ukeFile('PowerShell',`$env:OPENAI_API_KEY = "${key}"`);
+    }else{
+      html+=ukeFile('Terminal',`export OPENAI_API_KEY="${key}"`);
+    }
+  }else if(ukeClient==='cursor'){
+    const cfg=`{
+  "openai.apiBaseUrl": "${base}/v1",
+  "openai.apiKey": "${key}",
+  "openai.model": "gpt-5.6-sol"
+}`;
+    html=ukeFile('Cursor / VS Code Settings',cfg);
+    html+=ukeFile('.env',`OPENAI_BASE_URL=${base}/v1\nOPENAI_API_KEY=${key}\nANTHROPIC_BASE_URL=${base}\nANTHROPIC_API_KEY=${key}`);
+  }else if(ukeClient==='mcp'){
+    const cfg=`{
+  "mcpServers": {
+    "m365-gateway": {
+      "url": "${base}/v1/mcp/sse",
+      "headers": {
+        "Authorization": "Bearer ${key}"
+      }
+    }
+  }
+}`;
+    html=ukeFile('claude_desktop_config.json / mcp.json',cfg);
+  }else if(ukeClient==='curl'){
+    html=ukeFile('cURL',`curl ${base}/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${key}" \\
+  -d '{"model":"gpt-5.6-sol","messages":[{"role":"user","content":"Hello world"}],"stream":true}'`);
+    html+=ukeFile('Python (OpenAI SDK)',`from openai import OpenAI
+
+client = OpenAI(
+    base_url="${base}/v1",
+    api_key="${key}"
+)
+
+resp = client.chat.completions.create(
+    model="gpt-5.6-sol",
+    messages=[{"role": "user", "content": "Hello"}]
+)
+print(resp.choices[0].message.content)`);
   }
   $('useKeyFiles').innerHTML=html;
 }
@@ -1732,13 +1774,37 @@ async function modelTestAll(){
   showNotice(t('Model test complete'),'success');
 }
 
+let currentModelMappings=[];
 async function loadSettings(){
   try{
     const d=await api('/api/admin/settings');
     const v=d.settings||{};
     $('setListen').value=v.listenAddress||'';
     $('setTimeout').value=v.chatTimeoutSeconds||120;
+    currentModelMappings=v.modelMappings||[];
+    renderModelMappingsTable();
   }catch(e){showNotice(e.message,'error');}
+}
+function renderModelMappingsTable(){
+  if(!currentModelMappings.length){
+    $('modelMappingRows').innerHTML=`<tr><td colspan="4" class="empty">No models configured</td></tr>`;
+    return;
+  }
+  const levels=['low','medium','high','xhigh'];
+  $('modelMappingRows').innerHTML=currentModelMappings.map((m,idx)=>{
+    const curLevel=String(m.defaultReasoningLevel||'low').toLowerCase();
+    const opts=levels.map(lvl=>`<option value="${lvl}" ${lvl===curLevel?'selected':''}>${lvl.toUpperCase()}</option>`).join('');
+    return `<tr data-idx="${idx}">
+      <td><code>${esc(m.publicModel)}</code></td>
+      <td>${esc(m.displayName||m.publicModel)}</td>
+      <td><code>${esc(m.upstreamTone)}</code></td>
+      <td>
+        <select class="form-input" style="padding:4px 8px;font-size:13px;width:120px" onchange="currentModelMappings[${idx}].defaultReasoningLevel=this.value">
+          ${opts}
+        </select>
+      </td>
+    </tr>`;
+  }).join('');
 }
 async function saveSettings(){
   try{
@@ -1747,8 +1813,10 @@ async function saveSettings(){
     const body={};
     if(listen)body.listenAddress=listen;
     if(timeout)body.chatTimeoutSeconds=parseInt(timeout);
+    if(currentModelMappings.length)body.modelMappings=currentModelMappings;
     await api('/api/admin/settings',{method:'PUT',body:JSON.stringify(body)});
     showNotice(t('Settings saved'),'success');
+    loadSettings();
   }catch(e){showNotice(e.message,'error');}
 }
 

@@ -98,7 +98,21 @@ func writeAnthropicResult(w http.ResponseWriter, model string, stream bool, src 
 			}
 		}
 	}
-	out := map[string]any{"id": id, "type": "message", "role": "assistant", "model": model, "content": blocks, "stop_reason": stop, "stop_sequence": nil, "usage": map[string]any{"input_tokens": inputTokens, "output_tokens": outputTokens}}
+	out := map[string]any{
+		"id":            id,
+		"type":          "message",
+		"role":          "assistant",
+		"model":         model,
+		"content":       blocks,
+		"stop_reason":   stop,
+		"stop_sequence": nil,
+		"usage": map[string]any{
+			"input_tokens":                inputTokens,
+			"output_tokens":               outputTokens,
+			"cache_creation_input_tokens": 0,
+			"cache_read_input_tokens":     0,
+		},
+	}
 	if !stream {
 		jsonOut(w, out)
 		return
