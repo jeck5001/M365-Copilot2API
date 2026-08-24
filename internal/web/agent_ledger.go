@@ -135,12 +135,38 @@ func normalizeFailure(s string) string {
 	return s
 }
 func (l agentLedger) RouterContext() string {
-	type compact struct {
-		Completed    []toolEvidence `json:"completed"`
-		Pending      []toolEvidence `json:"pending"`
-		RepeatedCall bool           `json:"repeated_call"`
+	type compactEvidence struct {
+		ID        string `json:"id,omitempty"`
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+		Result    string `json:"result,omitempty"`
+		Failed    bool   `json:"failed,omitempty"`
 	}
-	b, _ := json.Marshal(compact{l.Completed, l.Pending, l.RepeatedCall})
+	type compact struct {
+		Completed    []compactEvidence `json:"completed,omitempty"`
+		Pending      []compactEvidence `json:"pending,omitempty"`
+		RepeatedCall bool              `json:"repeated_call,omitempty"`
+	}
+	completed := make([]compactEvidence, 0, len(l.Completed))
+	for _, e := range l.Completed {
+		summary := compactToolResult(e.Result, 300)
+		completed = append(completed, compactEvidence{
+			ID:        e.ID,
+			Name:      e.Name,
+			Arguments: e.Arguments,
+			Result:    summary,
+			Failed:    e.Failed,
+		})
+	}
+	pending := make([]compactEvidence, 0, len(l.Pending))
+	for _, e := range l.Pending {
+		pending = append(pending, compactEvidence{
+			ID:        e.ID,
+			Name:      e.Name,
+			Arguments: e.Arguments,
+		})
+	}
+	b, _ := json.Marshal(compact{completed, pending, l.RepeatedCall})
 	hint := "Use only this compact evidence. A completed call is final evidence; do not issue the same name and arguments again."
 	if l.RepeatedFailure {
 		hint += " The same call failed repeatedly; change strategy instead of retrying unchanged."

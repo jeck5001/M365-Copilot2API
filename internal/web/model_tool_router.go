@@ -7,25 +7,28 @@ import (
 )
 
 func modelToolRouterPrompt(prompt string, tools []map[string]any, choice any) string {
-	prompt = compactToolResult(prompt, 8000)
+	if idx := strings.Index(prompt, "[user]"); idx >= 0 {
+		prompt = prompt[idx:]
+	} else if idx := strings.Index(prompt, "\n[user]"); idx >= 0 {
+		prompt = prompt[idx+1:]
+	}
+	prompt = compactToolResult(prompt, 6000)
 	defs, _ := json.Marshal(tools)
 	mode := normalizedToolChoiceMode(choice)
-	rules := `- If a tool is needed, respond with: CALL_TOOL: tool_name({"arg1":"value1"})
-- If no tool is needed, respond with: NO_TOOL_NEEDED
+	rules := `- If a tool is needed (such as inspecting files, executing commands, checking directories or running tests), respond with: CALL_TOOL: tool_name({"arg1":"value1"})
+- If all information is collected and you are ready to answer the user, respond with: NO_TOOL_NEEDED
 - Only use tools from the available list above
 - Validate all arguments against the tool's schema
 - Do not invent tools that are not in the list
 - For exploration, analysis, or inspection tasks, continue calling tools until you have gathered all necessary information and files. Do NOT output a plan or intention to check something next without calling the tool; call the tool immediately using CALL_TOOL:.
 - Never output explanatory text before CALL_TOOL: or NO_TOOL_NEEDED`
-	// Multi-turn: completed tool evidence (tool[...], tool_calls:) was already
-	// acted upon, so re-invoking those tools would duplicate work.
-	if strings.Contains(prompt, "tool_calls:") || strings.Contains(prompt, "tool[call_") {
+	if strings.Contains(prompt, "tool_calls:") || strings.Contains(prompt, "tool[call_") || strings.Contains(prompt, "EVIDENCE_SUMMARY") {
 		rules += `
-- Completed evidence must not be repeated: tool_calls/tool[call_x] rows are prior results already delivered to the user, never re-invoke them
+- Completed evidence must not be repeated: completed tool calls are already executed, never re-invoke identical calls
 - Only start a new tool call when fresh unfinished work remains on the current request
 - If you still need to inspect more files or verify more details to fulfill the request, call the tool now`
 	}
-	return fmt.Sprintf(`You are a tool selection assistant. Based on the user request, decide which tool to call next.
+	return fmt.Sprintf(`You are a tool execution planner. Based on the user request, decide which tool to call next.
 
 Available tools: %s
 
@@ -34,7 +37,7 @@ MODE: %s
 Rules:
 %s
 
-User request and evidence:
+User request and context:
 %s`, defs, mode, rules, prompt)
 }
 
