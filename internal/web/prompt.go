@@ -9,6 +9,7 @@ import (
 func flattenPromptMessages(messages []oaiMsg, attachments []chathub.Attachment) (string, []chathub.Attachment) {
 	var systemParts []string
 	var rest []oaiMsg
+	var firstUserMsg string
 	for _, m := range messages {
 		role := strings.ToLower(strings.TrimSpace(m.Role))
 		if role == "system" || role == "developer" {
@@ -19,13 +20,21 @@ func flattenPromptMessages(messages []oaiMsg, attachments []chathub.Attachment) 
 				systemParts = append(systemParts, txt)
 			}
 		} else {
+			if role == "user" && firstUserMsg == "" {
+				uTxt, _ := parseContent(m.Content)
+				firstUserMsg = strings.TrimSpace(uTxt)
+			}
 			rest = append(rest, m)
 		}
 	}
 	var b strings.Builder
 	if len(systemParts) > 0 {
+		sysText := strings.Join(systemParts, "\n")
+		if len(sysText) > 8000 {
+			sysText = compactToolResult(sysText, 8000)
+		}
 		b.WriteString("\n[system]\n")
-		b.WriteString(strings.Join(systemParts, "\n"))
+		b.WriteString(sysText)
 		b.WriteString("\n")
 	}
 	totalRest := len(rest)
@@ -56,8 +65,8 @@ func flattenPromptMessages(messages []oaiMsg, attachments []chathub.Attachment) 
 		}
 		if role == "tool" {
 			toolLimit := maxToolResultBytes()
-			if i < totalRest-2 {
-				toolLimit = 2000
+			if i < totalRest-4 {
+				toolLimit = 800
 			}
 			txt = compactToolResult(txt, toolLimit)
 			b.WriteString(fmt.Sprintf("\n[tool result id=%s]\n%s\n", m.ToolCallID, txt))
@@ -71,9 +80,12 @@ func flattenPromptMessages(messages []oaiMsg, attachments []chathub.Attachment) 
 	res := strings.TrimSpace(b.String())
 	const maxTotalPromptChars = 45000
 	if len(res) > maxTotalPromptChars {
-		head := 15000
-		tail := maxTotalPromptChars - head - 120
+		head := 10000
+		tail := maxTotalPromptChars - head - 200
 		res = res[:head] + fmt.Sprintf("\n... [history truncated %d chars] ...\n", len(res)-head-tail) + res[len(res)-tail:]
+		if firstUserMsg != "" && !strings.Contains(res, firstUserMsg) {
+			res += fmt.Sprintf("\n[user (original goal)]\n%s\n", firstUserMsg)
+		}
 	}
 	return res, attachments
 }
