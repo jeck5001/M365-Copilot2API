@@ -287,8 +287,8 @@ func (c *Client) ChatWithReasoning(ctx context.Context, acc Account, req Request
 
 func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request, onDelta func(string) error, onEvent StreamHandler) (Result, error) {
 	res, err := c.chatWithHandlersAttempt(ctx, acc, req, onDelta, onEvent, true)
-	if err != nil && errors.Is(err, errPooledConnEarlyFailure) {
-		log.Printf("[connpool] pooled connection failed early, falling back to fresh dial")
+	if err != nil && (errors.Is(err, errPooledConnEarlyFailure) || errors.Is(err, ErrOffensiveContent)) {
+		log.Printf("[connpool] pooled connection failed (%v), retrying with fresh dial", err)
 		return c.chatWithHandlersAttempt(ctx, acc, req, onDelta, onEvent, false)
 	}
 	return res, err
