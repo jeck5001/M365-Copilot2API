@@ -7,6 +7,7 @@ import (
 )
 
 func modelToolRouterPrompt(prompt string, tools []map[string]any, choice any) string {
+	prompt = compactToolResult(prompt, 8000)
 	defs, _ := json.Marshal(tools)
 	mode := normalizedToolChoiceMode(choice)
 	rules := `- If a tool is needed, respond with: CALL_TOOL: tool_name({"arg1":"value1"})
