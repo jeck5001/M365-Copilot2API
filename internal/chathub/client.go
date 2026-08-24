@@ -29,18 +29,35 @@ var ErrRateLimitNotice = errors.New("upstream rate-limit notice")
 
 var ErrEmptyCompletion = errors.New("upstream returned empty completion; tone may be unavailable for this tenant")
 
-var ErrMeteringOutOfCredits = errors.New("upstream metering out of credits")
+var ErrImageLimit = errors.New("upstream image generation daily limit reached")
 
-const gatewayCustomInstructions = `You have access to real tools on the caller's machine. Call tools directly when needed. Do not say tools are unavailable.`
+var ErrOffensiveContent = errors.New("upstream content policy flagged as offensive")
 
-var ErrContentPolicyBlocked = errors.New("upstream content policy blocked")
-
-type ThrottlingInfo struct {
-	Raw             json.RawMessage
-	MaxTurnCount    int
-	MeteringCredits any
+var contentPolicyPatterns = []string{
+	"很抱歉，我无法响应",
+	"我很抱歉，我无法响应",
+	"很抱歉，我无法",
+	"抱歉，我无法",
+	"i'm sorry, i can't respond",
+	"i'm sorry, i cannot respond",
+	"i apologize, i cannot",
 }
 
+func IsContentPolicyBlock(text string) bool {
+	if len(text) > 300 {
+		return false
+	}
+	low := strings.ToLower(text)
+	for _, p := range contentPolicyPatterns {
+		if strings.Contains(low, strings.ToLower(p)) {
+			return true
+		}
+	}
+	return false
+}
+
+// DialError carries the HTTP status and optional Retry-After from a failed
+// WebSocket dial so the web layer can route it into the correct cooldown.
 type DialError struct {
 	Status     int
 	RetryAfter int
@@ -67,209 +84,6 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
-}
-
-// overlapLen returns the length of the longest suffix of cur that is also a
-// prefix of snapshot, i.e. how much of snapshot cur already ends with. The scan
-// starts at the longest candidate so the common case — a snapshot that repeats
-// almost everything and appends a little — settles in the first few rounds.
-//
-// Matches are byte-wise but the result is always a rune boundary: two different
-// CJK characters can share a leading byte, and cutting there would emit half a
-// character and corrupt the text.
-func overlapLen(cur, snapshot string) int {
-	for n := minInt(len(cur), len(snapshot)); n > 0; n-- {
-		if n < len(snapshot) && !utf8.RuneStart(snapshot[n]) {
-			continue
-		}
-		if strings.HasSuffix(cur, snapshot[:n]) {
-			return n
-		}
-	}
-	return 0
-}
-
-// unseenTail returns the part of snapshot that has not been streamed yet. It is
-// the fallback for a snapshot that does not extend a known baseline, where the
-// only usable signal is an overlap with what the caller already received.
-func unseenTail(cur, snapshot string) string {
-	if cur == "" {
-		return snapshot
-	}
-	if strings.HasPrefix(snapshot, cur) {
-		return strings.TrimPrefix(snapshot, cur)
-	}
-	if i := strings.Index(snapshot, cur); i >= 0 {
-		return snapshot[i+len(cur):]
-	}
-	// No containment: assume every byte is new. Trimming on a boundary overlap
-	// here deleted text, because unrelated prose shares short runs by chance, and
-	// the run that matches is the head of the answer.
-	return snapshot
-}
-
-// snapshotEmitter converts ChatHub's text frames into non-overlapping deltas.
-//
-// ChatHub carries the answer on two channels that look interchangeable and are
-// not. A capture of 50 turns shows:
-//
-//   - messages[].text — usually one bot prose message per turn, occasionally a
-//     preamble followed by the answer, resent in full on every frame and
-//     strictly prefix-cumulative: not one snapshot in 50 turns failed to start
-//     with its predecessor, and concatenating each message's last snapshot
-//     reproduced the completion frame's answer exactly every time.
-//   - writeAtCursor — a separate incremental stream that is not the same
-//     content. Over one 4932-character answer it omitted 1506 characters in 235
-//     gaps, and its increments matched the snapshot's growth twice out of 531.
-//
-// So the channels duplicate each other without agreeing, and merging them can
-// only repeat text or delete it. Earlier rounds tried to reconcile them by
-// overlap and produced both: 857KB of echo from one 4.7KB answer, then answers
-// with characters missing mid-sentence. Only the snapshot channel is complete
-// and checkable against the completion frame, so it alone drives the stream and
-// writeAtCursor is a fallback for a turn that never sends a bot message.
-type snapshotEmitter struct {
-	// streamed reports everything emitted so far, including deltas that did not
-	// come from a snapshot source.
-	streamed func() string
-	last     map[string]string
-	emit     func(string) error
-	// sawSnapshot latches once any bot message arrives: from then on the cursor
-	// channel is redundant, and emitting it would double the answer.
-	sawSnapshot bool
-	// cursorEmitted records that the fallback wrote text this turn, so the first
-	// snapshot knows the buffer may already hold part of it.
-	cursorEmitted bool
-}
-
-func newSnapshotEmitter(streamed func() string, emit func(string) error) *snapshotEmitter {
-	return &snapshotEmitter{streamed: streamed, last: map[string]string{}, emit: emit}
-}
-
-// Add reports a bot message's snapshot and emits only its unseen part. State is
-// per source, so a second message cannot reset the first message's baseline.
-//
-// Growth is a prefix extension in every captured turn, which makes the delta an
-// exact slice rather than a guess. The remaining branches are defensive: nothing
-// in the capture restates or rewinds a snapshot, and if that ever happens the
-// overlap search repeats text instead of dropping it. That direction is
-// deliberate — the answer returned to the caller comes from the completion
-// frame, so a duplicate is a display artifact while a deletion corrupts a reply.
-func (s *snapshotEmitter) Add(source, snapshot string) error {
-	if snapshot == "" {
-		return nil
-	}
-	s.sawSnapshot = true
-	prev, seen := s.last[source]
-	if snapshot == prev {
-		return nil
-	}
-	s.last[source] = snapshot
-	if seen && strings.HasPrefix(snapshot, prev) {
-		return s.emit(snapshot[len(prev):])
-	}
-	if !seen && !s.cursorEmitted {
-		// A message the stream has not carried any part of yet.
-		return s.emit(snapshot)
-	}
-	// Either the cursor fallback already wrote some of this turn, or a source
-	// restated its text instead of extending it.
-	return s.emit(unseenTail(s.streamed(), snapshot))
-}
-
-// AddCursor reports a writeAtCursor delta. It is emitted verbatim — the channel
-// is already incremental, so applying snapshot logic to it was itself a source
-// of corruption — and only until the first bot message arrives, after which the
-// snapshot channel carries the same answer in full and this one is pure echo.
-func (s *snapshotEmitter) AddCursor(delta string) error {
-	if delta == "" || s.sawSnapshot {
-		return nil
-	}
-	s.cursorEmitted = true
-	return s.emit(delta)
-}
-
-// dumpFrames writes the turn's raw SignalR frames to the path in
-// M365_CHATHUB_DUMP_FRAMES, one JSON frame per line, and does nothing when that
-// variable is unset. How ChatHub splits an answer across writeAtCursor and the
-// resent messages array is the one thing the timing logs cannot show, and the
-// snapshot merge is guesswork without it. Frames contain the answer text, so this
-// stays opt-in and off by default.
-// maxFrameDumpBytes bounds the dump file. It is append-only on a mounted volume,
-// so a flag left on after debugging would otherwise grow without limit. A few
-// turns' worth of frames is all the merge logic needs.
-const maxFrameDumpBytes = 64 << 20
-
-func dumpFrames(path string, events []json.RawMessage) {
-	if path == "" {
-		return
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		log.Printf("chathub frame dump open failed path=%s err=%v", path, err)
-		return
-	}
-	defer f.Close()
-	if st, err := f.Stat(); err == nil && st.Size() >= maxFrameDumpBytes {
-		log.Printf("chathub frame dump full size=%d path=%s, skipping", st.Size(), path)
-		return
-	}
-	for _, ev := range events {
-		if _, err := f.Write(append(append([]byte(nil), ev...), '\n')); err != nil {
-			log.Printf("chathub frame dump write failed err=%v", err)
-			return
-		}
-	}
-	log.Printf("chathub frame dump wrote frames=%d path=%s", len(events), path)
-}
-
-// completionText returns the answer text carried by a SignalR type 2 completion
-// frame's item. ChatHub restates the finished turn there as a normal messages
-// array, which makes it the one authoritative copy of the answer: it is a single
-// value rather than something reassembled from a stream. In 19 captured turns it
-// matched the last streamed snapshot exactly.
-//
-// item.result.message repeats the same text, but it is a status field that also
-// carries error strings on failure, so the messages array is the safer source
-// and this takes precedence over it.
-//
-// A turn can hold more than one prose message: the model says what it is about
-// to do, works, then answers. All of them are part of the reply and all of them
-// were streamed, so taking only the last silently dropped the preamble for
-// non-streaming callers. Joining them matched the streamed text byte for byte in
-// all 50 captured turns.
-func completionText(item map[string]any) string {
-	msgs, _ := item["messages"].([]any)
-	var text strings.Builder
-	for _, raw := range msgs {
-		m, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		author, _ := m["author"].(string)
-		mt, _ := m["messageType"].(string)
-		t, _ := m["text"].(string)
-		// Same filter as the streaming path: visible bot prose only, never
-		// Progress or tool-call envelopes.
-		if author == "bot" && mt == "" && strings.TrimSpace(t) != "" {
-			text.WriteString(t)
-		}
-	}
-	return text.String()
-}
-
-// messageSource names the snapshot stream a bot message belongs to, so each
-// message is diffed only against its own previous text. ChatHub has used
-// several spellings for the identifier and does not always send one; the array
-// position is a stable fallback because the full messages array is resent in
-// frame order.
-func messageSource(m map[string]any, index int) string {
-	for _, key := range []string{"messageId", "id", "requestId"} {
-		if v, ok := m[key].(string); ok && v != "" {
-			return "msg:" + v
-		}
-	}
-	return fmt.Sprintf("msg#%d", index)
 }
 
 const (
@@ -299,7 +113,37 @@ type Request struct {
 	Attachments    []Attachment
 	Tools          []Tool
 	ToolChoice     any
+	MCPServerURL   string
 	Started        bool
+	ConversationSignature   string
+	PreviousMessages        []ContextMessage
+	LicenseType             string
+	Scenario                string
+	ConnectedFederatedIDs   []string
+	FeatureFlags            FeatureFlags
+	Locale                  string
+	Market                  string
+	TimeZone                string
+	TimeZoneOffset          int
+	DeviceOS                string
+}
+
+type FeatureFlags struct {
+	MemoryV2            bool
+	DeepWork            bool
+	ComputerUse         bool
+	RealtimeVoice       bool
+	SystemPromptOverride bool
+	DesignerImageGen4o  bool
+	CodeCanvas          bool
+	SydneyReconnect     bool
+}
+
+type ContextMessage struct {
+	Author      string `json:"author"`
+	Description string `json:"description"`
+	ContextType string `json:"contextType"`
+	MessageType string `json:"messageType"`
 }
 
 // StreamEvent is the protocol-neutral event exposed while ChatHub is still
@@ -317,25 +161,67 @@ type StreamEvent struct {
 
 type StreamHandler func(StreamEvent) error
 
+type Timestamps struct {
+	RequestSent                string `json:"requestSent"`
+	FirstServiceResponseReceived string `json:"firstServiceResponseReceived,omitempty"`
+	FirstTokenReceived         string `json:"firstTokenReceived,omitempty"`
+	LastTokenReceived          string `json:"lastTokenReceived,omitempty"`
+}
+
 type Result struct {
-	Text           string
-	Reasoning      string
-	ConversationID string
-	SessionID      string
-	RequestID      string
-	Throttling     *ThrottlingInfo
-	RawResult      string
-	Events         []json.RawMessage
-	Normalized     []Event
-	Images         []string
+	Text                      string
+	Reasoning                 string
+	ConversationID            string
+	SessionID                 string
+	RequestID                 string
+	Throttling                any
+	SuggestedResponses        []SuggestedResponse
+	RawResult                 string
+	Events                    []json.RawMessage
+	Normalized                []Event
+	Images                    []string
+	Offense                   string
+	Scores                    []Score
+	ConversationTransferToken string
+	MeteringInformation       any
+	SpokenText                string
+	StorageMessageID          string
+	References                map[string]Reference
+	Timestamps                Timestamps
+}
+
+type SuggestedResponse struct {
+	CommandText        string `json:"commandText"`
+	Text               string `json:"text"`
+	SuggestionCategory string `json:"suggestionCategory,omitempty"`
+	ContentOrigin      string `json:"contentOrigin,omitempty"`
+	HiddenText         string `json:"hiddenText,omitempty"`
+	MessageID          string `json:"messageId,omitempty"`
+	Author             string `json:"author,omitempty"`
+	CreatedAt          string `json:"createdAt,omitempty"`
+	MessageType        string `json:"messageType,omitempty"`
+	Offense            string `json:"offense,omitempty"`
+}
+
+type Score struct {
+	Component string  `json:"component"`
+	Score     float64 `json:"score"`
+}
+
+type Reference struct {
+	TargetLink          string `json:"targetLink"`
+	ProviderDisplayName string `json:"providerDisplayName,omitempty"`
+	Title               string `json:"title,omitempty"`
+	Snippet             string `json:"snippet,omitempty"`
+	LastUpdatedDate     string `json:"lastUpdatedDate,omitempty"`
 }
 
 type Client struct {
-	HTTPHeader  http.Header
-	HTTPClient  *http.Client
-	Dialer      *websocket.Dialer
-	Pool        *ConnPool
-	Trace       func(map[string]any)
+	HTTPHeader http.Header
+	HTTPClient *http.Client
+	Dialer     *websocket.Dialer
+	Pool       *ConnPool
+	Trace      func(map[string]any)
 }
 
 func NewClient() *Client {
@@ -411,7 +297,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		firstTurn = true
 	}
 	requestID := uuid.NewString()
-	wsURL, err := buildWSURL(acc, req.SessionID, req.ConversationID, requestID)
+	wsURL, err := BuildWSURL(acc, req.SessionID, req.ConversationID, requestID, req.LicenseType, req.Scenario)
 	if err != nil {
 		return Result{}, err
 	}
@@ -423,11 +309,23 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 	dialStarted := time.Now()
 	var conn *websocket.Conn
 	var reused bool
+
 	if c.Pool != nil {
 		var poolErr error
 		conn, reused, poolErr = c.Pool.Take(ctx, acc.OID, acc.TID, wsURL)
 		if poolErr != nil {
 			return Result{}, fmt.Errorf("ws dial: %w", poolErr)
+		}
+		if reused {
+			go func() {
+				warmCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				warmReqID := uuid.NewString()
+				warmSID := uuid.NewString()
+				warmCID := uuid.NewString()
+				warmURL, _ := BuildWSURL(acc, warmSID, warmCID, warmReqID, req.LicenseType, req.Scenario)
+				c.Pool.Warm(warmCtx, acc, warmURL)
+			}()
 		}
 	}
 	if conn == nil {
@@ -445,7 +343,11 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 			return Result{}, fmt.Errorf("ws dial: %w", err)
 		}
 	}
-	log.Printf("chathub timing ws_dial_ms=%d total_ms=%d reused=%t", time.Since(dialStarted).Milliseconds(), time.Since(startedAt).Milliseconds(), reused)
+	if reused {
+		log.Printf("chathub timing ws_dial_ms=0 total_ms=%d reused=true (pooled)", time.Since(startedAt).Milliseconds())
+	} else {
+		log.Printf("chathub timing ws_dial_ms=%d total_ms=%d reused=false", time.Since(dialStarted).Milliseconds(), time.Since(startedAt).Milliseconds())
+	}
 
 	var writeMu sync.Mutex
 	wsWrite := func(msgType int, data []byte) error {
@@ -454,7 +356,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		return conn.WriteMessage(msgType, data)
 	}
 
-	returnConn := true
+	returnConn := false
 	defer func() {
 		if returnConn && conn != nil && c.Pool != nil {
 			_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -486,7 +388,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		}
 	}
 
-	payload := chatPayload(req.Text, req.SessionID, req.ConversationID, requestID, req.Tone, firstTurn, req.Attachments, req.Tools, req.ToolChoice)
+	payload := chatPayload(req, requestID, firstTurn)
 	log.Printf("chathub prompt-trace text=%d tools=%d payload=%d", len(req.Text), len(req.Tools), len(payload))
 	if c.Trace != nil {
 		meta := map[string]any{"stage": "chathub_payload", "attachment_count": len(req.Attachments), "payload_has_attachments": strings.Contains(payload, `"attachments"`), "attachments": []map[string]any{}}
@@ -497,6 +399,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 	}
 	log.Printf("chathub timing handshake_ms=%d", time.Since(dialStarted).Milliseconds())
 	payloadSentAt := time.Now()
+	ts := Timestamps{RequestSent: payloadSentAt.UTC().Format(time.RFC3339Nano)}
 	if err := wsWrite(websocket.TextMessage, []byte(payload)); err != nil {
 		returnConn = false
 		return Result{}, fmt.Errorf("chat send: %w", err)
@@ -513,6 +416,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		}
 		if streamed.Len() == 0 {
 			log.Printf("chathub timing first_delta_ms=%d len=%d", time.Since(payloadSentAt).Milliseconds(), len(d))
+			ts.FirstTokenReceived = time.Now().UTC().Format(time.RFC3339Nano)
 		}
 		streamed.WriteString(d)
 		deltas = append(deltas, d)
@@ -522,6 +426,9 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		return nil
 	}
 	// ChatHub signals text either as a full snapshot or as cursor rewrites.
+	// Only the portion not already streamed may be emitted; naive prefix
+	// checks misfire when upstream rewrites the whole buffer, which duplicated
+	// answers (AAA…). Match any overlap and emit the tail.
 	// Upstream rate limiting surfaces as a human-readable notice on the text
 	// channel instead of an HTTP 429. Detect it before any real content has
 	// streamed so the web layer can fail over rather than answer with it.
@@ -536,51 +443,20 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 			strings.Contains(t, "太多请求") ||
 			strings.Contains(t, "无法响应这么多请求") ||
 			strings.Contains(t, "too many requests") ||
-			strings.Contains(t, "please retry") && strings.Contains(t, "later") ||
-			strings.Contains(t, "customthrottlereply") ||
-			strings.Contains(t, "customlimitthrottlereply") ||
-			strings.Contains(t, "meteringoutofcredits")
+			strings.Contains(t, "please retry") && strings.Contains(t, "later")
 	}
-	meteringOutOfCredits := func(text string) bool {
-		return strings.Contains(strings.ToLower(text), "meteringoutofcredits")
-	}
-	contentPolicyBlocked := func(text string) bool {
-		if len(text) > 300 {
+	imageLimitDetected := func(text string) bool {
+		if streamed.Len() != 0 {
 			return false
 		}
-		tl := strings.ToLower(text)
-		return (strings.Contains(tl, "content policy") && strings.Contains(tl, "block")) ||
-			strings.Contains(tl, "i'm sorry, i can't respond") ||
-			strings.Contains(tl, "i'm sorry, i cannot respond") ||
-			strings.Contains(tl, "很抱歉，我无法响应") ||
-			strings.Contains(tl, "我很抱歉，我无法响应") ||
-			strings.Contains(tl, "contentfilter") ||
-			strings.Contains(tl, "safetyblocked")
+		t := strings.ToLower(text)
+		return strings.Contains(t, "无法生成更多图像") || strings.Contains(t, "unable to generate more images") || strings.Contains(t, "cannot generate more images today")
 	}
-	parseThrottling := func(raw any) *ThrottlingInfo {
-		if raw == nil {
-			return nil
+	contentPolicyDetected := func(text string) bool {
+		if streamed.Len() != 0 {
+			return false
 		}
-		b, err := json.Marshal(raw)
-		if err != nil {
-			return nil
-		}
-		info := &ThrottlingInfo{Raw: json.RawMessage(b)}
-		var m map[string]any
-		if json.Unmarshal(b, &m) == nil {
-			if v, ok := m["maxTurnCount"]; ok {
-				if f, ok := v.(float64); ok {
-					info.MaxTurnCount = int(f)
-				}
-			}
-			if _, ok := m["meteringInformation"]; ok {
-				info.MeteringCredits = m["meteringInformation"]
-			}
-			if _, ok := m["remainingAllowance"]; ok {
-				info.MeteringCredits = m["remainingAllowance"]
-			}
-		}
-		return info
+		return IsContentPolicyBlock(text)
 	}
 	emitSnapshot := func(snapshot string) error {
 		if snapshot == "" {
@@ -589,14 +465,14 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		if chTrace {
 			log.Printf("[trace:emitSnapshot] cur=%d snapshot=%d", streamed.Len(), len(snapshot))
 		}
+		if imageLimitDetected(snapshot) {
+			return ErrImageLimit
+		}
 		if rateLimited(snapshot) {
-			if meteringOutOfCredits(snapshot) {
-				return ErrMeteringOutOfCredits
-			}
 			return ErrRateLimitNotice
 		}
-		if contentPolicyBlocked(snapshot) {
-			return ErrContentPolicyBlocked
+		if contentPolicyDetected(snapshot) {
+			return ErrOffensiveContent
 		}
 		cur := streamed.String()
 		if cur == "" {
@@ -612,18 +488,27 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		return nil
 	}
 	var final string
-	var throttlingInfo *ThrottlingInfo
+	var throttling any
 	var rawResult string
 	var events []json.RawMessage
+	var suggestions []SuggestedResponse
 	seenStreamTools := map[string]bool{}
 	var reasoningBuf strings.Builder
+	var offense string
+	var scores []Score
+	var conversationTransferToken string
+	var meteringInformation any
+	var spokenText string
+	var storageMessageID string
+	references := make(map[string]Reference)
+	var firstServiceResponse bool
 
 	deadline := time.Now().Add(5 * time.Minute)
 	type wsRead struct {
 		msg []byte
 		err error
 	}
-	readCh := make(chan wsRead, 1)
+	readCh := make(chan wsRead, 8)
 	go func() {
 		for {
 			_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
@@ -644,9 +529,11 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		}
 		if read.err != nil {
 			returnConn = false
-			// Never convert a timeout or dropped WebSocket into a successful
-			// partial response. A response is complete only after SignalR type 3.
 			return Result{}, fmt.Errorf("ws read before completion: %w", read.err)
+		}
+		if !firstServiceResponse {
+			firstServiceResponse = true
+			ts.FirstServiceResponseReceived = time.Now().UTC().Format(time.RFC3339Nano)
 		}
 		for _, part := range strings.Split(string(read.msg), rs) {
 			part = strings.TrimSpace(part)
@@ -693,9 +580,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 							reasoningBuf.WriteString(ev.Text)
 						}
 						ev.Raw = eventRaw(arg)
-						// SearchResults frames carry live citations; surface them to
-						// handlers even though they are classified as text.
-						if (ev.Kind != "text" || ev.ContentType == "SearchResults") && onEvent != nil {
+						if ev.Kind != "text" && onEvent != nil {
 							if err := onEvent(ev); err != nil {
 								returnConn = false
 								return Result{}, err
@@ -712,12 +597,79 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 						}
 					}
 					if thr, ok := arg["throttling"]; ok {
-						throttlingInfo = parseThrottling(thr)
+						throttling = thr
+					}
+					if ctt, ok := arg["conversationTransferToken"].(string); ok && ctt != "" {
+						conversationTransferToken = ctt
+					}
+					if mi, ok := arg["meteringInformation"]; ok && mi != nil {
+						meteringInformation = mi
+					}
+					if srs, ok := arg["suggestedResponses"].([]any); ok {
+						for _, srRaw := range srs {
+							sr, ok := srRaw.(map[string]any)
+							if !ok {
+								continue
+							}
+							suggestions = append(suggestions, parseSuggestedResponse(sr))
+						}
 					}
 					if w, ok := arg["writeAtCursor"].(string); ok && w != "" && !toolFrame {
-						if err := emitDelta(w); err != nil {
+						if err := emitSnapshot(w); err != nil {
 							returnConn = false
 							return Result{}, err
+						}
+					}
+					if patches, ok := arg["patches"].([]any); ok {
+						for _, praw := range patches {
+							p, ok := praw.(map[string]any)
+							if !ok {
+								continue
+							}
+							op, _ := p["op"].(string)
+							path, _ := p["path"].(string)
+							value, _ := p["value"]
+							if op != "replace" || path == "" {
+								continue
+							}
+							parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
+							if len(parts) < 2 {
+								continue
+							}
+							field := parts[1]
+							switch field {
+							case "spokenText":
+								if vs, ok := value.(string); ok {
+									spokenText = vs
+								}
+							}
+						}
+					}
+					if refs, ok := arg["references"].(map[string]any); ok && len(refs) > 0 {
+						for k, v := range refs {
+							rm, ok := v.(map[string]any)
+							if !ok {
+								continue
+							}
+							ref := Reference{}
+							if tl, ok := rm["targetLink"].(string); ok {
+								ref.TargetLink = tl
+							}
+							if pdn, ok := rm["providerDisplayName"].(string); ok {
+								ref.ProviderDisplayName = pdn
+							}
+							if t, ok := rm["title"].(string); ok {
+								ref.Title = t
+							}
+							if s, ok := rm["snippet"].(string); ok {
+								ref.Snippet = s
+							}
+							if lud, ok := rm["lastUpdatedDate"].(string); ok {
+								ref.LastUpdatedDate = lud
+							}
+							if ref.TargetLink != "" || ref.Title != "" {
+								references[k] = ref
+							}
 						}
 					}
 					if msgs, ok := arg["messages"].([]any); ok {
@@ -729,6 +681,23 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 							author, _ := m["author"].(string)
 							text, _ := m["text"].(string)
 							mt, _ := m["messageType"].(string)
+							if o, ok := m["offense"].(string); ok && o != "" && o != "Unknown" && o != "None" {
+								offense = o
+							}
+							if ss, ok := m["scores"].([]any); ok {
+								for _, sraw := range ss {
+									if sm, ok := sraw.(map[string]any); ok {
+										comp, _ := sm["component"].(string)
+										sc, _ := sm["score"].(float64)
+										if comp != "" {
+											scores = append(scores, Score{Component: comp, Score: sc})
+										}
+									}
+								}
+							}
+							if st, ok := m["spokenText"].(string); ok {
+								spokenText = st
+							}
 							if author == "bot" && mt == "" && text != "" {
 								// ChatHub often sends the first visible text as a full snapshot,
 								// followed by cursor deltas. Emit only the unseen suffix.
@@ -746,30 +715,40 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 			if int(t) == 2 {
 				item, _ := obj["item"].(map[string]any)
 				if item != nil {
+					if smid, ok := item["storageMessageId"].(string); ok && smid != "" {
+						storageMessageID = smid
+					}
 					if thr, ok := item["throttling"]; ok {
-						throttlingInfo = parseThrottling(thr)
+						throttling = thr
+					}
+					if sugg, ok := item["suggestedResponses"].([]any); ok && len(sugg) > 0 && len(suggestions) == 0 {
+						for _, s := range sugg {
+							if sm, ok := s.(map[string]any); ok {
+								sr := parseSuggestedResponse(sm)
+								if sr.CommandText != "" || sr.Text != "" {
+									suggestions = append(suggestions, sr)
+								}
+							}
+						}
 					}
 					if res, ok := item["result"].(map[string]any); ok {
 						rawResult, _ = res["value"].(string)
 				if msg, ok := res["message"].(string); ok {
 						final = msg
-						if meteringOutOfCredits(final) {
+						if imageLimitDetected(final) {
 							returnConn = false
-							return Result{}, ErrMeteringOutOfCredits
+							return Result{}, ErrImageLimit
 						}
 						if rateLimited(final) {
 							returnConn = false
 							return Result{}, ErrRateLimitNotice
 						}
-						if contentPolicyBlocked(final) {
+						if IsContentPolicyBlock(final) {
 							returnConn = false
-							return Result{}, ErrContentPolicyBlocked
+							return Result{}, ErrOffensiveContent
 						}
 					}
-if t := completionText(item); t != "" {
-						final = t
 					}
-				}
 				}
 				// completion frame often follows; keep reading a bit but we already have content
 				continue
@@ -780,8 +759,8 @@ if t := completionText(item); t != "" {
 					returnConn = false
 					return Result{}, fmt.Errorf("chathub completion error: %v", errObj)
 				}
+				ts.LastTokenReceived = time.Now().UTC().Format(time.RFC3339Nano)
 				log.Printf("chathub timing completion_frame_ms=%d streamed_text=%d events=%d", time.Since(payloadSentAt).Milliseconds(), streamed.Len(), len(events))
-dumpFrames(os.Getenv("M365_CHATHUB_DUMP_FRAMES"), events)
 				text := streamed.String()
 				if text == "" {
 					text = final
@@ -789,38 +768,59 @@ dumpFrames(os.Getenv("M365_CHATHUB_DUMP_FRAMES"), events)
 				if text == "" {
 					text = strings.Join(deltas, "")
 				}
-if joined := strings.Join(deltas, ""); joined != text {
-					// The merge is heuristic; the completion frame is not. A mismatch
-					// means the streamed display differed from the answer returned.
-					log.Printf("chathub snapshot merge mismatch streamed=%d final=%d", len(joined), len(text))
+				if imageLimitDetected(text) {
+					returnConn = false
+					return Result{}, ErrImageLimit
 				}
 				if rateLimited(text) {
 					returnConn = false
-					if meteringOutOfCredits(text) {
-						return Result{}, ErrMeteringOutOfCredits
-					}
 					return Result{}, ErrRateLimitNotice
-				}
-				if contentPolicyBlocked(text) {
-					returnConn = false
-					return Result{}, ErrContentPolicyBlocked
 				}
 				if text == "" {
 					returnConn = false
 					return Result{}, ErrEmptyCompletion
 				}
-				return Result{
-					Text:           text,
-					Reasoning:      reasoningBuf.String(),
-					ConversationID: req.ConversationID,
-					SessionID:      req.SessionID,
-					RequestID:      requestID,
-					Throttling:     throttlingInfo,
-					RawResult:      rawResult,
-					Events:         events,
-					Normalized:     NormalizeEvents(events),
-					Images:         imageURLs(events),
-				}, nil
+				if offense != "" {
+					returnConn = false
+					return Result{}, ErrOffensiveContent
+				}
+				if IsContentPolicyBlock(text) {
+					returnConn = false
+					return Result{}, ErrOffensiveContent
+				}
+				result := Result{
+					Text:                      text,
+					Reasoning:                 reasoningBuf.String(),
+					ConversationID:            req.ConversationID,
+					SessionID:                 req.SessionID,
+					RequestID:                 requestID,
+					Throttling:                throttling,
+					SuggestedResponses:        suggestions,
+					Offense:                   offense,
+					Scores:                    scores,
+					ConversationTransferToken: conversationTransferToken,
+					MeteringInformation:       meteringInformation,
+					SpokenText:                spokenText,
+					StorageMessageID:          storageMessageID,
+					References:                references,
+					RawResult:                 rawResult,
+					Events:                    events,
+					Normalized:                NormalizeEvents(events),
+					Images:                    imageURLs(events),
+					Timestamps:                ts,
+				}
+				if c.Pool != nil {
+					go func() {
+						warmCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+						defer cancel()
+						warmReqID := uuid.NewString()
+						warmSID := uuid.NewString()
+						warmCID := uuid.NewString()
+						warmURL, _ := BuildWSURL(acc, warmSID, warmCID, warmReqID, req.LicenseType, req.Scenario)
+						c.Pool.Warm(warmCtx, acc, warmURL)
+					}()
+				}
+				return result, nil
 			}
 		}
 	}
@@ -832,10 +832,11 @@ if joined := strings.Join(deltas, ""); joined != text {
 	return Result{}, fmt.Errorf("chathub response deadline exceeded before completion")
 }
 
-func buildWSURL(acc Account, sessionID, conversationID, requestID string) (string, error) {
+func BuildWSURL(acc Account, sessionID, conversationID, requestID, licenseType, scenario string) (string, error) {
 	q := url.Values{}
 	q.Set("chatsessionid", requestID)
 	q.Set("clientrequestid", requestID)
+	q.Set("XRoutingParameterSessionKey", requestID)
 	q.Set("X-SessionId", sessionID)
 	q.Set("ConversationId", conversationID)
 	q.Set("access_token", acc.AccessToken)
@@ -844,9 +845,17 @@ func buildWSURL(acc Account, sessionID, conversationID, requestID string) (strin
 	q.Set("source", `"officeweb"`)
 	q.Set("product", "Office")
 	q.Set("agentHost", "Bizchat.FullScreen")
-	q.Set("licenseType", "Starter")
+	if licenseType != "" {
+		q.Set("licenseType", licenseType)
+	} else {
+		q.Set("licenseType", "Starter")
+	}
 	q.Set("agent", "web")
-	q.Set("scenario", "OfficeWebIncludedCopilot")
+	if scenario != "" {
+		q.Set("scenario", scenario)
+	} else {
+		q.Set("scenario", "OfficeWebIncludedCopilot")
+	}
 
 	// url.Values encodes quotes; probe used safe='",' so keep quotes unescaped-ish.
 	// Gorilla/url will encode " to %22 which MS accepts.
@@ -987,29 +996,56 @@ func (c *Client) uploadAttachments(ctx context.Context, acc Account, conversatio
 	return nil
 }
 
-func chatPayload(text, sessionID, conversationID, requestID, tone string, firstTurn bool, attachments []Attachment, tools []Tool, toolChoice any) string {
-	text = toolProtocolPrompt(text, tools, toolChoice)
+func chatPayload(req Request, requestID string, firstTurn bool) string {
+	locale := req.Locale
+	if locale == "" {
+		locale = "en-us"
+	}
+	market := req.Market
+	if market == "" {
+		market = "en-us"
+	}
+	tz := req.TimeZone
+	if tz == "" {
+		tz = "UTC"
+	}
+	tzOffset := req.TimeZoneOffset
+	deviceOS := req.DeviceOS
+	if deviceOS == "" {
+		deviceOS = "Windows"
+	}
+	text := toolProtocolPrompt(req.Text, req.Tools, req.ToolChoice, len(clientPlugins(req.Tools, req.MCPServerURL)) > 0)
+	federatedConns := req.ConnectedFederatedIDs
+	if len(federatedConns) == 0 {
+		federatedConns = []string{"dummyId"}
+	}
+	fcAny := make([]any, len(federatedConns))
+	for i, id := range federatedConns {
+		fcAny[i] = id
+	}
 	message := map[string]any{
 		"author":                "user",
-		"attachments":           attachments,
+		"attachments":           req.Attachments,
 		"inputMethod":           "Keyboard",
 		"text":                  text,
 		"entityAnnotationTypes": []string{"People", "File", "Event", "Email", "TeamsMessage"},
 		"requestId":             requestID,
 		"locationInfo": map[string]any{
-			"timeZoneOffset": 8,
-			"timeZone":       "Asia/Shanghai",
+			"timeZoneOffset": tzOffset,
+			"timeZone":       tz,
 		},
-		"locale":            "zh-cn",
+		"locale":            locale,
+		"market":            market,
 		"messageType":       "Chat",
 		"experienceType":    "Default",
 		"adaptiveCards":     []any{},
 		"clientPreferences": map[string]any{},
+		"connectedFederatedConnections": fcAny,
 	}
 	// The browser does not send an OpenAI attachments array to ChatHub. It
 	// sends a file annotation after the file has been uploaded by Office.
-	annotations := make([]any, 0, len(attachments))
-	for _, a := range attachments {
+	annotations := make([]any, 0, len(req.Attachments))
+	for _, a := range req.Attachments {
 		if a.Type != "image" || a.DocID == "" {
 			continue
 		}
@@ -1034,12 +1070,12 @@ func chatPayload(text, sessionID, conversationID, requestID, tone string, firstT
 	}
 	if len(annotations) > 0 {
 		message["messageAnnotations"] = annotations
-		message["connectedFederatedConnections"] = []string{"dummyId"}
+		message["connectedFederatedConnections"] = fcAny
 	}
 	// Restore the old gateway's multimodal injection path. The historical
 	// implementation merged imageUrl/imageBase64 directly into message rather
 	// than relying solely on the newer attachments array.
-	for _, a := range attachments {
+	for _, a := range req.Attachments {
 		if a.Type != "image" || a.URL == "" {
 			continue
 		}
@@ -1057,50 +1093,113 @@ func chatPayload(text, sessionID, conversationID, requestID, tone string, firstT
 		"update_textdoc_response_after_streaming",
 		"deepleo_networking_timeout_10minutes_canmore",
 		"cwc_flux_image",
+		"cwc_code_interpreter",
+		"cwc_code_interpreter_amsfix",
 		"cwcfluxgptv",
 		"flux_v3_gptv_enable_upload_multi_image_in_turn_wo_ch",
 		"gptvnorm2048",
+		"cwc_code_interpreter_citation_fix",
+		"code_interpreter_interactive_charts",
+		"cwc_code_interpreter_interactive_charts_inline_image",
+		"code_interpreter_matplotlib_patching",
 		"cwc_fileupload_odb",
-		"update_memory_plugin",
-		"add_custom_instructions",
 		"cwc_flux_v3",
 		"flux_v3_progress_messages",
 		"enable_batch_token_processing",
 		"enable_gg_gpt",
+		"flux_v3_references",
+		"flux_v3_references_entities",
+		"flux_v3_references_ci",
+		"add_filestore_filetype",
+		"cwc_code_interpreter_citation_sourceannotations",
+		"cdxcwc_code_interpreter_hallucinated_url_filter",
+		"flux_v3_image_gen_enable_dimensions",
+		"flux_v3_image_gen_enable_non_watermarked_storage",
+		"flux_v3_image_gen_enable_icon_dimensions",
+		"flux_v3_image_gen_enable_system_text_with_params",
+		"flux_v3_image_gen_enable_designer_dimensions_meta_prompting_in_system_prompts",
+		"flux_v3_image_gen_enable_story",
+		"rich_responses",
+	}
+	if req.FeatureFlags.MemoryV2 {
+		optionsSets = append(optionsSets, "update_memory_plugin", "add_custom_instructions")
+	}
+	if req.FeatureFlags.DeepWork {
+		optionsSets = append(optionsSets, "enable_deep_work")
+	}
+	if req.FeatureFlags.ComputerUse {
+		optionsSets = append(optionsSets, "enable_computer_use")
+	}
+	if req.FeatureFlags.RealtimeVoice {
+		optionsSets = append(optionsSets, "enable_realtime_voice")
+	}
+	if req.FeatureFlags.SystemPromptOverride {
+		optionsSets = append(optionsSets, "enable_system_prompt_override")
+	}
+	if req.FeatureFlags.DesignerImageGen4o {
+		optionsSets = append(optionsSets, "enable_designer_image_gen_4o")
+	}
+	if req.FeatureFlags.CodeCanvas {
+		optionsSets = append(optionsSets, "feature.enableCodeCanvas")
+	}
+	if req.FeatureFlags.SydneyReconnect {
+		optionsSets = append(optionsSets, "enable_sydney_reconnect")
 	}
 	chat := map[string]any{
 		"arguments": []any{
 			map[string]any{
 				"source":              "officeweb",
 				"clientCorrelationId": uuid.NewString(),
-				"sessionId":           sessionID,
+				"sessionId":           req.SessionID,
 				"optionsSets":         optionsSets,
 				"options":             map[string]any{},
 				"allowedMessageTypes": []string{
-					"Chat", "Suggestion", "Disengaged", "Progress", "EndOfRequest", "InternalLoaderMessage",
+					"Chat", "Suggestion", "InternalSearchQuery", "Disengaged",
+					"InternalLoaderMessage", "Progress", "GeneratedCode",
+					"RenderCardRequest", "AdsQuery", "SemanticSerp",
+					"GenerateContentQuery", "GenerateGraphicArt", "SearchQuery",
+					"ConfirmationCard", "AuthError", "DeveloperLogs",
+					"TriggerPlugin", "HintInvocation", "MemoryUpdate",
+					"EndOfRequest", "TriggerConfirmation", "ResumeInvokeAction",
+					"ResumeUserInputRequest", "TriggerUserInputRequest",
+					"EscapeHatch", "TriggerPluginAuth", "ResumePluginAuth",
+					"SideBySide", "ReferencesListComplete", "SwitchRespondingEndpoint",
 				},
 				"sliceIds":          []any{},
 				"threadLevelGptId":  map[string]any{},
-				"conversationId":    conversationID,
+				"conversationId":    req.ConversationID,
 				"traceId":           uuid.NewString(),
 				"isStartOfSession":  firstTurn,
 				"productThreadType": "Office",
 				"clientInfo": map[string]any{
-					"clientPlatform": "mcmcopilot-web",
-					"clientAppName":  "Office",
+					"clientPlatform":        "mcmcopilot-web",
+					"clientAppName":         "Office",
+					"clientEntrypoint":      "mcmcopilot-officeweb",
+					"clientSessionId":       req.SessionID,
+					"ProductCategory":       "Chat",
+					"clientAppType":         "Web",
+					"productEntryPoint":     "ChatPanel",
+					"deviceOS":              deviceOS,
+					"deviceType":            "Desktop",
+					"clientPlatformVersion": "10",
 				},
-				"tone":          tone,
+				"tone":          req.Tone,
 				"streamingMode": "ConciseWithPadding",
 				"message":       message,
 
-				"plugins":            clientPlugins(tools),
-				"toolChoice":         toolChoice,
-				"customInstructions": gatewayCustomInstructions,
+				"plugins":    clientPlugins(req.Tools, req.MCPServerURL),
+				"toolChoice": req.ToolChoice,
 			},
 		},
 		"invocationId": "0",
 		"target":       "chat",
 		"type":         4,
+	}
+	if req.ConversationSignature != "" {
+		chat["arguments"].([]any)[0].(map[string]any)["conversationSignature"] = req.ConversationSignature
+	}
+	if len(req.PreviousMessages) > 0 {
+		chat["arguments"].([]any)[0].(map[string]any)["previousMessages"] = req.PreviousMessages
 	}
 	metrics := map[string]any{
 		"arguments": []any{
@@ -1119,4 +1218,55 @@ func chatPayload(text, sessionID, conversationID, requestID, tone string, firstT
 	b1, _ := json.Marshal(chat)
 	b2, _ := json.Marshal(metrics)
 	return string(b1) + rs + string(b2) + rs
+}
+
+func parseSuggestedResponse(m map[string]any) SuggestedResponse {
+	ct, _ := m["commandText"].(string)
+	t, _ := m["text"].(string)
+	sc, _ := m["suggestionCategory"].(string)
+	co, _ := m["contentOrigin"].(string)
+	ht, _ := m["hiddenText"].(string)
+	mid, _ := m["messageId"].(string)
+	author, _ := m["author"].(string)
+	ca, _ := m["createdAt"].(string)
+	mt, _ := m["messageType"].(string)
+	off, _ := m["offense"].(string)
+	return SuggestedResponse{
+		CommandText: ct, Text: t, SuggestionCategory: sc, ContentOrigin: co,
+		HiddenText: ht, MessageID: mid, Author: author, CreatedAt: ca,
+		MessageType: mt, Offense: off,
+	}
+}
+
+var (
+	citeOpen  = string([]rune{0xE200}) + "cite" + string([]rune{0xE202})
+	citeClose = string([]rune{0xE201})
+)
+
+func StripCitationMarkers(text string, refs map[string]Reference) (string, []string) {
+	if !strings.Contains(text, citeOpen) {
+		return text, nil
+	}
+	var urls []string
+	var b strings.Builder
+	for {
+		i := strings.Index(text, citeOpen)
+		if i < 0 {
+			b.WriteString(text)
+			break
+		}
+		b.WriteString(text[:i])
+		after := text[i+len(citeOpen):]
+		j := strings.Index(after, citeClose)
+		if j < 0 {
+			b.WriteString(text[i:])
+			break
+		}
+		refID := after[:j]
+		text = after[j+len(citeClose):]
+		if ref, ok := refs[refID]; ok && ref.TargetLink != "" {
+			urls = append(urls, ref.TargetLink)
+		}
+	}
+	return b.String(), urls
 }

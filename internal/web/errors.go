@@ -7,7 +7,10 @@ import (
 	"net/http"
 
 	"m365-copilot2api/internal/auth"
+	"m365-copilot2api/internal/chathub"
 )
+
+var ErrOffensiveContent = errors.New("upstream content policy flagged as offensive")
 
 func logOAuthError(stage string, err error) {
 	var oauthErr *auth.OAuthError
@@ -32,27 +35,27 @@ func upstreamError(err error) string {
 // rate limits stay 429 (with Retry-After when known), auth failures become 401,
 // everything else is 502. Unknown upstream failures must never leak internals.
 func upstreamStatus(err error) int {
-	if IsPermissionDenied(err) {
-		return http.StatusForbidden
+	if errors.Is(err, chathub.ErrOffensiveContent) {
+		return http.StatusServiceUnavailable
 	}
-	if IsAuthFailure(err) {
-		return http.StatusUnauthorized
+	if errors.Is(err, chathub.ErrImageLimit) {
+		return http.StatusTooManyRequests
 	}
 	if IsRateLimited(err) {
 		return http.StatusTooManyRequests
 	}
-	if IsInsufficientQuota(err) {
-		return http.StatusTooManyRequests
+	if IsAuthFailure(err) {
+		return http.StatusUnauthorized
 	}
-	if IsServerUnavailable(err) {
-		return http.StatusServiceUnavailable
-	}
-	if IsTimeout(err) {
-		return http.StatusGatewayTimeout
+	var httpErr *UpstreamHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.Status
 	}
 	return http.StatusBadGateway
 }
 
+// writeUpstreamError renders a failed upstream call as an HTTP response,
+// surfacing the Retry-After hint for rate limits so clients can back off.
 func writeUpstreamError(w http.ResponseWriter, err error) {
 	if retry := RetryAfterSeconds(err); retry > 0 {
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
@@ -60,34 +63,24 @@ func writeUpstreamError(w http.ResponseWriter, err error) {
 	status := upstreamStatus(err)
 	if status == http.StatusTooManyRequests {
 		if w.Header().Get("Retry-After") == "" {
-			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(rateLimitCooldown.Seconds())))
+			// Fallback: the configurable cooldown is in Server.getRateLimitCooldown(),
+			// but this function doesn't have access to settings. 30s is the default.
+			w.Header().Set("Retry-After", "30")
 		}
-		writeOpenAIError(w, status, "rate_limit_error", "rate limited by upstream; retry after the indicated cool-down period")
-		return
-	}
-	if IsInsufficientQuota(err) {
-		writeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_error", "account quota exhausted; check M365 subscription and Copilot license")
-		return
-	}
-	if IsPermissionDenied(err) {
-		writeOpenAIError(w, http.StatusForbidden, "authentication_error", "account not authorized for Copilot; check M365 subscription and Copilot license assignment")
-		return
-	}
-	if IsServerUnavailable(err) {
-		writeOpenAIError(w, http.StatusServiceUnavailable, "server_error", "upstream service temporarily unavailable; retry later")
-		return
-	}
-	if IsTimeout(err) {
-		writeOpenAIError(w, http.StatusGatewayTimeout, "server_error", "upstream request timed out")
+		if errors.Is(err, chathub.ErrImageLimit) {
+			writeOpenAIError(w, status, "image_limit_error", "image generation daily limit reached; try again tomorrow")
+			return
+		}
+		writeOpenAIError(w, status, "rate_limit_error", "upstream is rate limiting; try again shortly")
 		return
 	}
 	if IsEmptyCompletion(err) {
-		writeOpenAIError(w, http.StatusBadGateway, "server_error", "empty completion; model may be unavailable for this tenant")
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "upstream returned empty completion; the requested model may be unavailable for this tenant")
 		return
 	}
-	if IsContentBlocked(err) {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "content policy blocked this request")
+	if errors.Is(err, chathub.ErrOffensiveContent) {
+		writeOpenAIError(w, http.StatusServiceUnavailable, "upstream_content_blocked", "M365 content policy blocked this request; try again or switch account")
 		return
 	}
-	writeOpenAIError(w, status, "server_error", upstreamError(err))
+	writeOpenAIError(w, status, "upstream_error", upstreamError(err))
 }

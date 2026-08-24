@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -49,21 +50,45 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.settings.get().ChatTimeoutSeconds)*time.Second)
 	defer cancel()
+	streamSettings := s.settings.get()
 	res, err := s.chatWithAccount(ctx, acc.ID, chathub.Account{AccessToken: acc.AccessToken, OID: acc.OID, TID: acc.TID}, chathub.Request{
 		Text: text, Tone: body.Tone, ConversationID: body.ConversationID, SessionID: body.SessionID, Attachments: body.Attachments,
+		LicenseType: streamSettings.LicenseType, Scenario: streamSettings.Scenario,
+		ConversationSignature: body.ConversationSignature, PreviousMessages: body.PreviousMessages, ConnectedFederatedIDs: body.ConnectedFederatedIDs,
+		FeatureFlags: s.featureFlags(),
 	})
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", upstreamError(err))
+		if errors.Is(err, chathub.ErrImageLimit) && s.accountPool != nil {
+			s.accountPool.MarkImageLimited(acc.ID)
+		}
+		s.accountPool.MarkFailure(acc.ID, err, s.getRateLimitCooldown())
+		writeUpstreamError(w, err)
 		return
+	}
+	s.accountPool.MarkSuccess(acc.ID)
+	if res.Throttling != nil && s.accountPool != nil {
+		s.accountPool.UpdateThrottling(acc.ID, res.Throttling)
+		s.logThrottlingWarning(acc.ID, res.Throttling)
 	}
 	if body.SessionKey != "" {
 		s.sessions.upsert(conversation{ID: body.SessionKey, AccountID: acc.ID, ConversationID: res.ConversationID, SessionID: res.SessionID, Title: text})
 	}
 	res.Text = sanitizePublicAssistantText(res.Text)
+	res.Text, _ = chathub.StripCitationMarkers(res.Text, res.References)
 	res.Reasoning = sanitizePublicReasoningText(res.Reasoning)
 
+	if res.Throttling != nil {
+		if b, err := json.Marshal(res.Throttling); err == nil {
+			w.Header().Set("X-M365-Throttling", string(b))
+		}
+	}
+	if len(res.Scores) > 0 {
+		if b, err := json.Marshal(res.Scores); err == nil {
+			w.Header().Set("X-M365-Scores", string(b))
+		}
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -93,7 +118,11 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request) {
 	if err := writeSSE(r, w, flusher, "done", map[string]any{
 		"type": "done", "text": res.Text,
 		"conversationId": res.ConversationID, "sessionId": res.SessionID, "requestId": res.RequestID,
-		"throttling": res.Throttling,
+		"throttling": res.Throttling, "suggestedResponses": res.SuggestedResponses,
+		"offense": res.Offense, "scores": res.Scores, "conversationTransferToken": res.ConversationTransferToken,
+		"meteringInformation": res.MeteringInformation, "spokenText": res.SpokenText,
+		"storageMessageId": res.StorageMessageID,
+		"timestamps": res.Timestamps,
 	}); err != nil {
 		return
 	}
