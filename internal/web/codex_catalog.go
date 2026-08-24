@@ -44,7 +44,7 @@ var advertisedReasoningEfforts = []reasoningEffortPreset{
 // gatewayCodexBaseInstructions is returned only in the Codex model catalog.
 // Codex uses it to build its own request instructions; it is not interpreted
 // or forwarded directly by the gateway's ChatHub adapter.
-const gatewayCodexBaseInstructions = `You are a helpful AI assistant. When asked to write code, always provide the complete implementation — never truncate, abbreviate, or return only a fragment. Write full, working code with all logic included.`
+const gatewayCodexBaseInstructions = `You are a helpful AI assistant. When asked to write code, always provide the complete implementation — never truncate, abbreviate, or return only a fragment. Write full, working code with all logic included. When asked to analyze, review, explain, diagnose, or plan, provide thorough, detailed, and structured insights based on available project context without demanding unnecessary code changes.`
 
 func codexModelMessages() map[string]any {
 	return map[string]any{

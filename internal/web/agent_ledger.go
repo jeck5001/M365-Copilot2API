@@ -74,7 +74,7 @@ func buildAgentLedger(messages []oaiMsg) agentLedger {
 		}
 		if m.Role == "tool" {
 			if e, ok := calls[m.ToolCallID]; ok {
-				e.Result = compactToolResult(contentToString(m.Content), 4000)
+				e.Result = compactToolResult(contentToString(m.Content), 16000)
 				e.Failed = failureSignal.MatchString(e.Result)
 				calls[m.ToolCallID] = e
 			}
