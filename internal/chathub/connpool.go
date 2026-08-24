@@ -46,7 +46,7 @@ func (p *ConnPool) Take(ctx context.Context, oid, tid string, wsURL string) (*we
 	conns := p.conns[key]
 	for i := len(conns) - 1; i >= 0; i-- {
 		pc := conns[i]
-		if time.Since(pc.created) < 2*time.Minute && pc.handshook {
+		if time.Since(pc.created) < 35*time.Second && pc.handshook {
 			p.conns[key] = append(conns[:i], conns[i+1:]...)
 			p.mu.Unlock()
 			return pc.conn, true, nil
@@ -149,7 +149,7 @@ func (p *ConnPool) GC() {
 	for k, conns := range p.conns {
 		kept := conns[:0]
 		for _, pc := range conns {
-			if now.Sub(pc.created) > 2*time.Minute {
+			if now.Sub(pc.created) > 35*time.Second {
 				pc.conn.Close()
 			} else {
 				kept = append(kept, pc)

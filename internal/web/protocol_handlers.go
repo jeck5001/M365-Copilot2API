@@ -100,11 +100,12 @@ func translateChatStreamToResponsesInternal(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+		if line == "data: [DONE]" {
 			continue
 		}
+		rawJSON := strings.TrimPrefix(line, "data: ")
 		var chunk map[string]any
-		if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk) != nil {
+		if json.Unmarshal([]byte(rawJSON), &chunk) != nil {
 			continue
 		}
 		// A failed upstream turn arrives as an error frame after any deltas it
@@ -116,6 +117,9 @@ func translateChatStreamToResponsesInternal(w http.ResponseWriter, r *http.Reque
 			if streamErr == "" {
 				streamErr = "upstream stream failed"
 			}
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 		choices, _ := chunk["choices"].([]any)
@@ -182,11 +186,15 @@ func translateChatStreamToResponsesInternal(w http.ResponseWriter, r *http.Reque
 		if status == 0 {
 			status = http.StatusBadGateway
 		}
+		errMsg := streamErr
+		if errMsg == "" {
+			errMsg = "inner chat request failed"
+		}
 		emit("response.failed", map[string]any{
 			"type": "response.failed",
 			"response": map[string]any{
 				"id": id, "object": "response", "status": "failed", "model": model,
-				"error": map[string]any{"code": status, "message": "inner chat request failed"},
+				"error": map[string]any{"code": status, "message": errMsg},
 			},
 		})
 		return
@@ -528,11 +536,12 @@ func translateChatStreamToAnthropic(w http.ResponseWriter, r *http.Request, mode
 			return
 		}
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+		if line == "data: [DONE]" {
 			continue
 		}
+		rawJSON := strings.TrimPrefix(line, "data: ")
 		var chunk map[string]any
-		if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk) != nil {
+		if json.Unmarshal([]byte(rawJSON), &chunk) != nil {
 			continue
 		}
 		if errFrame, ok := chunk["error"].(map[string]any); ok {
@@ -540,6 +549,9 @@ func translateChatStreamToAnthropic(w http.ResponseWriter, r *http.Request, mode
 			if streamErr == "" {
 				streamErr = "upstream stream failed"
 			}
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 		choices, _ := chunk["choices"].([]any)
@@ -645,9 +657,13 @@ func translateChatStreamToAnthropic(w http.ResponseWriter, r *http.Request, mode
 		if status == 0 {
 			status = http.StatusBadGateway
 		}
+		errMsg := streamErr
+		if errMsg == "" {
+			errMsg = "inner chat request failed"
+		}
 		emit("error", map[string]any{
 			"type":  "error",
-			"error": map[string]any{"type": "api_error", "message": "inner chat request failed"},
+			"error": map[string]any{"type": "api_error", "message": errMsg},
 		})
 		return
 	}

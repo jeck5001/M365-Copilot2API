@@ -33,6 +33,8 @@ var ErrImageLimit = errors.New("upstream image generation daily limit reached")
 
 var ErrOffensiveContent = errors.New("upstream content policy flagged as offensive")
 
+var errPooledConnEarlyFailure = errors.New("pooled connection failed early")
+
 var contentPolicyPatterns = []string{
 	"很抱歉，我无法响应",
 	"我很抱歉，我无法响应",
@@ -284,6 +286,15 @@ func (c *Client) ChatWithReasoning(ctx context.Context, acc Account, req Request
 }
 
 func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request, onDelta func(string) error, onEvent StreamHandler) (Result, error) {
+	res, err := c.chatWithHandlersAttempt(ctx, acc, req, onDelta, onEvent, true)
+	if err != nil && errors.Is(err, errPooledConnEarlyFailure) {
+		log.Printf("[connpool] pooled connection failed early, falling back to fresh dial")
+		return c.chatWithHandlersAttempt(ctx, acc, req, onDelta, onEvent, false)
+	}
+	return res, err
+}
+
+func (c *Client) chatWithHandlersAttempt(ctx context.Context, acc Account, req Request, onDelta func(string) error, onEvent StreamHandler, usePool bool) (Result, error) {
 	startedAt := time.Now()
 	log.Printf("chathub timing start prompt_len=%d", len(req.Text))
 	if acc.AccessToken == "" || acc.OID == "" || acc.TID == "" {
@@ -318,7 +329,7 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 	var conn *websocket.Conn
 	var reused bool
 
-	if c.Pool != nil {
+	if usePool && c.Pool != nil {
 		var poolErr error
 		conn, reused, poolErr = c.Pool.Take(ctx, acc.OID, acc.TID, wsURL)
 		if poolErr != nil {
@@ -410,6 +421,9 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 	ts := Timestamps{RequestSent: payloadSentAt.UTC().Format(time.RFC3339Nano)}
 	if err := wsWrite(websocket.TextMessage, []byte(payload)); err != nil {
 		returnConn = false
+		if reused {
+			return Result{}, errPooledConnEarlyFailure
+		}
 		return Result{}, fmt.Errorf("chat send: %w", err)
 	}
 
@@ -537,6 +551,9 @@ func (c *Client) chatWithHandlers(ctx context.Context, acc Account, req Request,
 		}
 		if read.err != nil {
 			returnConn = false
+			if reused && streamed.Len() == 0 && len(events) == 0 {
+				return Result{}, errPooledConnEarlyFailure
+			}
 			return Result{}, fmt.Errorf("ws read before completion: %w", read.err)
 		}
 		if !firstServiceResponse {
