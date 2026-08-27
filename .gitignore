@@ -57,3 +57,5 @@ PROGRESS.md
 *.bak*
 _wip_backup_*
 *.dll
+tmp_lab/
+tmp_dump/
