@@ -26,6 +26,8 @@ services:
       # Frames contain answer text, so leave this unset for normal runs.
       M365_CHATHUB_DUMP_FRAMES: "${M365_CHATHUB_DUMP_FRAMES:-}"
       M365_PUBLIC_IDENTITY_POLICY: "${M365_PUBLIC_IDENTITY_POLICY:-false}"
+      # Set to 1 when the host has no working IPv6 route to Microsoft endpoints.
+      M365_FORCE_IPV4: "${M365_FORCE_IPV4:-0}"
     volumes:
       - ./data:/data
       - ./secrets/m365_admin_password:/run/secrets/m365_admin_password:ro
