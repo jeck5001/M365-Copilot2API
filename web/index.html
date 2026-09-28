@@ -1182,7 +1182,7 @@ function renderAccounts(){
     const flags=`<div style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap">${searchEnabled?'':'<span class="status warn"><i></i>No search</span>'}${x.systemPrompt?'<span class="status online"><i></i>Custom prompt</span>':''}</div>`;
     const checked=_accountSelection.has(x.id)?' checked':'';
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td><input type="checkbox" data-account-select value="${esc(x.id)}"${checked} onchange="toggleAccountSelect('${x.id}',this.checked)"></td><td><div class="account-cell"><div class="avatar"></div><div><b></b><div class="account-email" style="font-size:11px;color:var(--muted)"></div>${flags}</div></div></td><td style="font-size:12px;white-space:nowrap">${calls}<div style="margin-top:6px"><button class="btn-sm btn" data-account-action="probe">刷新额度</button></div></td><td>${status}</td><td style="font-size:12px;color:var(--muted)">${x.updatedAt?new Date(x.updatedAt).toLocaleString():'-'}</td><td><input type="number" min="0" max="9999" step="1" value="${x.priority||0}" title="${t('Higher values are selected first')}" class="form-input account-priority" onchange="setAccountPriority('${x.id}',this.value)"></td><td><button class="btn-sm btn${scheduleEnabled?'':' danger'}" data-account-action="schedule">${scheduleEnabled?'Enabled':'Disabled'}</button></td><td><span class="account-proxy" style="font-size:11px;word-break:break-all"></span> <button class="btn-sm btn" style="margin-top:2px" data-account-action="proxy">Bind</button></td><td><button class="btn-sm btn danger" data-account-action="delete">Delete</button></td>`;
+    tr.innerHTML=`<td><input type="checkbox" data-account-select value="${esc(x.id)}"${checked} onchange="toggleAccountSelect('${x.id}',this.checked)"></td><td><div class="account-cell"><div class="avatar"></div><div><b></b><div class="account-email" style="font-size:11px;color:var(--muted)"></div>${flags}</div></div></td><td style="font-size:12px;white-space:nowrap">${calls}<div style="margin-top:6px"><button class="btn-sm btn" data-account-action="probe">刷新额度</button></div></td><td>${status}</td><td style="font-size:12px;color:var(--muted)">${x.updatedAt?new Date(x.updatedAt).toLocaleString():'-'}</td><td><input type="number" min="0" max="9999" step="1" value="${x.priority||0}" title="Higher values are selected first" class="form-input account-priority" onchange="setAccountPriority('${x.id}',this.value)"></td><td><button class="btn-sm btn${scheduleEnabled?'':' danger'}" data-account-action="schedule">${scheduleEnabled?'Enabled':'Disabled'}</button></td><td><span class="account-proxy" style="font-size:11px;word-break:break-all"></span> <button class="btn-sm btn" style="margin-top:2px" data-account-action="proxy">Bind</button></td><td><button class="btn-sm btn danger" data-account-action="delete">Delete</button></td>`;
     tr.querySelector('.avatar').textContent=(x.displayName||x.email||'M')[0];
     tr.querySelector('b').textContent=x.displayName||x.email||'';
     tr.querySelector('.account-email').textContent=x.email||'';
@@ -1219,7 +1219,7 @@ async function setAccountPriority(id,value){
   if(!Number.isInteger(priority)||priority<0)return loadAccounts();
   try{
     await api('/api/accounts/priority',{method:'POST',body:JSON.stringify({id,priority})});
-    showNotice(t('Priority updated'),'success');
+    showNotice('Priority updated','success');
   }catch(e){showNotice(e.message,'error');loadAccounts();}
 }
 async function probeAccount(id, btn){
