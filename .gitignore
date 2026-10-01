@@ -54,8 +54,13 @@ AGENTS.md
 PROGRESS.md
 *.exe
 *.exe~
+*.exe.new
 *.bak*
 _wip_backup_*
 *.dll
-tmp_lab/
+
+# Frontend dependencies and local test scaffolding
+node_modules/
+test-artifacts/
 tmp_dump/
+tmp_lab/
