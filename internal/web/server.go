@@ -2231,25 +2231,28 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		calls, parsed := parseModelToolDecision(routeRes.Text, toolMaps, body.ToolChoice)
-		calls = filterCompletedCalls(calls, ledger)
-		calls, _ = validateCalls("router", calls)
 		if !parsed {
 			repairRes, repairErr := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: `Repair this tool routing output into JSON only with shape {"calls":[{"name":"function_name","arguments":{}}]}. Use {"calls":[]} if no tool is needed. OUTPUT:\n` + compactToolResult(routeRes.Text, 6000), Tone: tone, Attachments: body.Attachments, LicenseType: toolCfg.LicenseType, Scenario: toolCfg.Scenario})
 			if repairErr == nil && repairRes.ConversationID != "" {
 				s.dropTransientConversation(repairRes.ConversationID)
 			}
-			if parsed && len(calls) > 0 {
-				scope := fmt.Sprintf("%d:%v:stream", len(body.Messages), completedCallIDs(ledger))
-				for i := range calls {
-					calls[i].ID = scopedCallID(calls[i].Name, string(calls[i].Arguments), i, scope)
-				}
-				calls = limitToolCalls(calls, adaptiveToolCallLimit(calls, configuredToolCallLimit(s.settings)))
-				if body.ParallelToolCalls != nil && !*body.ParallelToolCalls && len(calls) > 1 {
-					calls = calls[:1]
-				}
-				_ = writeToolResponse(w, "chatcmpl-"+uuid.NewString(), firstNonEmpty(body.Model, "m365-copilot"), true, body.shouldSendStreamUsage(), calls, routeRes)
-				return
+			if repairErr == nil {
+				calls, parsed = parseModelToolDecision(repairRes.Text, toolMaps, body.ToolChoice)
 			}
+		}
+		calls = filterCompletedCalls(calls, ledger)
+		calls, _ = validateCalls("router", calls)
+		if parsed && len(calls) > 0 {
+			scope := fmt.Sprintf("%d:%v:stream", len(body.Messages), completedCallIDs(ledger))
+			for i := range calls {
+				calls[i].ID = scopedCallID(calls[i].Name, string(calls[i].Arguments), i, scope)
+			}
+			calls = limitToolCalls(calls, adaptiveToolCallLimit(calls, configuredToolCallLimit(s.settings)))
+			if body.ParallelToolCalls != nil && !*body.ParallelToolCalls && len(calls) > 1 {
+				calls = calls[:1]
+			}
+			_ = writeToolResponse(w, "chatcmpl-"+uuid.NewString(), firstNonEmpty(body.Model, "m365-copilot"), true, body.shouldSendStreamUsage(), calls, routeRes)
+			return
 		}
 	}
 	if body.Stream {
