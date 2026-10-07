@@ -26,10 +26,14 @@ func (w *streamingWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
-// Flush must be forwarded: SSE handlers assert http.Flusher on the writer
-// chain and stream frame-by-frame; without this the innermost buffered
-// response only flushes when the handler returns (all frames at once).
+// Flush forwards to the wrapped writer so streaming responses are delivered
+// incrementally. Without it this outermost wrapper would swallow every inner
+// Flush (the assertion below fails on a wrapper that lacks the method), and the
+// whole response would buffer until the handler returned.
 func (w *streamingWriter) Flush() {
+	if !w.headerWritten {
+		w.headerWritten = true
+	}
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
